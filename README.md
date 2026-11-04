@@ -40,7 +40,7 @@ Microphone Input ─┼─▶ High-Pass Filter (80 Hz)                          
 
 - **Hybrid Noise Suppression:** Erases non-stationary acoustic noise (mechanical key switches, fan turbulence, street noise, room reverberation) using an optimized **CoFi-Lite** ONNX neural network, with instantaneous on-the-fly fallback to classical spectral subtraction.
 - **Ultra-Low Latency:** Engineered for real-time interactive voice chat and competitive gaming, achieving **67.6 ms** roundtrip pipeline latency with the neural model and **47.6 ms** with classical filtering.
-- **Zero-Glitch Audio Pipeline:** Active sink gating and moving-average clock drift compensation eliminate startup buffer underruns and sample synchronization errors across mismatched hardware clocks.
+- **Glitch-Resistant Audio Pipeline:** Active sink gating and moving-average clock drift compensation significantly reduce startup buffer underruns and sample synchronization drift across mismatched hardware clocks.
 - **Windows System Tray Daemon (`--tray`):** Operates silently in the background with a dynamic taskbar icon reflecting microphone state (Active, Muted, Bypassed).
 - **System-Wide Global Hotkeys:** Low-level OS keyboard hooks capture commands (`Ctrl+Shift+M` mute toggle, `Ctrl+Shift+B` bypass toggle, Push-to-Talk) across all windows, including fullscreen 3D applications.
 - **Isolated Feedback Chimes:** Procedural, click-free audio cues (*blip* on mute, *chirp* on unmute) synthesized in-memory and routed exclusively to the headphone monitor—never broadcast to the virtual microphone stream.
@@ -129,13 +129,16 @@ Standard real-time Python audio pipelines frequently incur 120 ms+ latency due t
 
 Micforge v1.1.0 reduces end-to-end latency to **67.6 ms** (CoFi-Lite) and **47.6 ms** (Spectral Wiener) through:
 - **Causal STFT Delay Minimization:** Restructured the causal lookahead window inside the neural feature extractor, lowering algorithmic group delay from 2,335 samples (48.6 ms) to 1,470 samples (30.6 ms) at 48 kHz.
-- **Jitter Cushion Optimization:** Reduced the PortAudio ring-buffer safety cushion from 3.0 blocks to **1.5 blocks (15 ms)** while preserving zero-underrun stability.
+- **Jitter Cushion Optimization:** Tuned the default PortAudio ring-buffer safety cushion to **1.5 blocks (15 ms)** for ultra-low latency, with configurable headroom (`jitter_blocks` in config) for systems experiencing high DPC latency or background CPU spikes.
 - **Hardware-Accurate Profiling:** Latency calculation reflects actual hardware FIFO queue occupancy rather than driver theoretical allowances.
 
-### 2. Deterministic Startup & Clock Drift Compensation
-- **Active Sink Gating:** Output streams are held in a gated idle state until the input stream captures and delivers its initial valid audio frame. This prevents initial WASAPI shared-mode underruns and eliminates the startup glitches common on Windows audio hosts.
-- **Moving-Average Drift Synchronization:** Audio hardware clocks inherently experience subtle frequency variances (e.g., a 48,000.2 Hz USB microphone paired with a 47,999.7 Hz onboard DAC). Micforge employs a linear-algebra moving-average estimator that dynamically applies micro-resampling without audible pitch or phase distortion.
-- **Zero Heap Allocations:** DSP execution loops operate strictly on pre-allocated NumPy contiguous arrays within PortAudio real-time callbacks.
+### 2. Startup Gating & Clock Drift Compensation
+- **Active Sink Gating:** Output streams are held in a gated idle state until the input stream captures and delivers its initial valid audio frame. This suppresses the burst of initial buffer underruns (~50+ false glitches) commonly reported when WASAPI output sinks start before input hardware is ready.
+- **Moving-Average Drift Synchronization:** Audio hardware clocks inherently experience subtle frequency variances (e.g., a 48,000.2 Hz USB microphone paired with a 47,999.7 Hz onboard DAC). Micforge employs a linear-algebra moving-average estimator that dynamically applies micro-resampling to prevent cumulative clock drift.
+- **Zero Heap Allocations in Callbacks:** DSP execution loops operate strictly on pre-allocated NumPy contiguous arrays within PortAudio real-time callbacks to avoid Python garbage-collection hiccups.
+
+> [!TIP]
+> **Dealing with audio crackles or glitches?** Real-time audio performance is highly sensitive to system load, USB controller bandwidth, and Windows DPC latency (especially under heavy GPU gaming load). If your dashboard reports rising glitch counters or you hear audio stutter, open `%APPDATA%\micforge\config.json` and increase `"jitter_blocks"` from `1.5` to `2.5` or `3.0`.
 
 ### 3. Neural Architecture: CoFi-Lite
 - **Parameters:** ~83,000 parameters (~600 KB compiled ONNX binary).
