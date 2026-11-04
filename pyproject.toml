@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "micforge"
+version = "1.1.0"
+description = "Real-time microphone clean-up for Discord and voice chat: de-muffle, denoise, level, route."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "sounddevice>=0.4.6",
+    "rich>=13.0",
+    "onnxruntime>=1.16",
+    "pystray>=0.19",
+    "pillow>=9.0",
+    "pynput>=1.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "onnx>=1.14"]
+
+[project.scripts]
+micforge = "micforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+micforge = ["models/*.onnx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

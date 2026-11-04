@@ -1,0 +1,86 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+pip-wheel-metadata/
+share/python-wheels/
+
+# Unit test / coverage reports
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.cursor/
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+ehthumbs_vista.db
+[Tt]humbs.db
+[Dd]esktop.ini
+
+# Logs & temporary scratch directories
+*.log
+scratch/
+tmp/
+temp/
+
+# Audio test clips & recordings (prevent pushing heavy audio files)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aac
+*.m4a
+
+# Heavy PyTorch research checkpoints & external repos
+external/
+*.tar
+*.pth
+*.pt
+*.ckpt
+
+# Explicitly ensure the bundled production ONNX model is tracked
+!src/micforge/models/cofilite.onnx
+
