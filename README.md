@@ -166,7 +166,7 @@ The audio engine processes signals in 32-bit floating point through 8 discrete s
 | **2. Denoise** | CoFi-Lite Neural / STFT Wiener | Suppression of stationary and non-stationary acoustic noise | $16\text{ kHz}$ internal, causal overlap-add |
 | **3. Gate** | Downward Expander with Hysteresis | Attenuation of room reverberation and breath intake | Soft-knee, dynamic floor calibration |
 | **4. Parametric EQ** | 3-Band Biquad Cascade | Tonal correction (de-mud, vocal presence, top-end air) | 300 Hz ($-3\text{ dB}$), 3.2 kHz ($+2.5\text{ dB}$), 10 kHz ($+2\text{ dB}$) |
-| **5. De-Esser** | Split-Band Dynamic Attenuator | Transparent suppression of harsh vocal sibilance | $f_c = 6.5\text{ Hz}$, fast RMS envelope detection |
+| **5. De-Esser** | Split-Band Dynamic Attenuator | Transparent suppression of harsh vocal sibilance | $f_c = 6.5\text{ kHz}$, fast RMS envelope detection |
 | **6. Leveler** | Slow Optical-Style RMS Leveler | Normalization of conversational dynamics (whispers vs shouts) | $\tau = 1.2\text{ s}$ time constant |
 | **7. Compressor** | Feed-Forward VCA Emulation | Transient control and vocal consistency | $20\text{ ms}$ attack, $100\text{ ms}$ release, soft knee |
 | **8. Limiter** | True Peak Lookahead Brickwall | Guaranteed prevention of digital overs and DAC clipping | Threshold: $-1.0\text{ dBFS}$ |
