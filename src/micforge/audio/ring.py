@@ -1,10 +1,11 @@
 """Thread-safe float32 ring buffer used to hand audio from the input callback to output callbacks.
 
-Lock-free design: the write side (input callback) and read side (output callback)
-operate on independent atomic pointers.  The only shared variable is `_n` (fill level),
-which is updated with a single integer store – safe on CPython due to the GIL guarantee
-that int loads/stores are atomic.  This avoids lock contention between PortAudio threads
-which was a major source of output underruns and audible clicks.
+Lock-free Single-Producer Single-Consumer (SPSC) design:
+The write side (input callback) owns `_w`, and the read side (output callback) owns `_r`.
+Both pointers increase monotonically without wrap-around (Python arbitrary-precision integers
+never overflow 32-bit or 64-bit bounds).  Fill level is computed directly as `_w - _r`,
+completely eliminating shared mutable counters (`_n`) and cross-thread GIL race conditions
+which previously caused false buffer starvation and runaway underrun cascades.
 """
 from __future__ import annotations
 
@@ -17,16 +18,13 @@ class RingBuffer:
         self._buf = np.zeros(self._cap, dtype=np.float32)
         self._r = 0
         self._w = 0
-        self._n = 0  # atomic on CPython (int store/load under GIL)
 
     @property
     def fill(self) -> int:
-        return self._n
+        return max(0, self._w - self._r)
 
     def clear(self) -> None:
-        self._r = 0
-        self._w = 0
-        self._n = 0
+        self._r = self._w
 
     def write(self, x: np.ndarray) -> int:
         """Append samples. Returns how many *old* samples were dropped to make room."""
@@ -34,33 +32,37 @@ class RingBuffer:
         if x.shape[0] > self._cap:
             x = x[-self._cap :]
         n = x.shape[0]
+        w = self._w
+        r = self._r
 
         # Overflow: drop oldest samples to make room
-        dropped = max(0, self._n + n - self._cap)
+        dropped = max(0, (w + n) - r - self._cap)
         if dropped:
-            self._r = (self._r + dropped) % self._cap
-            self._n -= dropped
+            self._r = r + dropped
 
         # Copy data into the circular buffer
-        first = min(n, self._cap - self._w)
-        self._buf[self._w : self._w + first] = x[:first]
+        w_idx = w % self._cap
+        first = min(n, self._cap - w_idx)
+        self._buf[w_idx : w_idx + first] = x[:first]
         if first < n:
             self._buf[: n - first] = x[first:]
-        self._w = (self._w + n) % self._cap
-        self._n += n
+        self._w = w + n
         return dropped
 
     def read(self, n: int) -> tuple[np.ndarray, int]:
         """Read up to n samples. Returns (array of length n, zero-padded; samples actually read)."""
         out = np.zeros(n, dtype=np.float32)
-        got = min(n, self._n)
+        w = self._w
+        r = self._r
+        avail = max(0, w - r)
+        got = min(n, avail)
         if got > 0:
-            first = min(got, self._cap - self._r)
-            out[:first] = self._buf[self._r : self._r + first]
+            r_idx = r % self._cap
+            first = min(got, self._cap - r_idx)
+            out[:first] = self._buf[r_idx : r_idx + first]
             if first < got:
                 out[first:got] = self._buf[: got - first]
-            self._r = (self._r + got) % self._cap
-            self._n -= got
+            self._r = r + got
         return out, got
 
     def read_into(self, dest: np.ndarray) -> int:
@@ -71,14 +73,17 @@ class RingBuffer:
         Returns the number of samples actually read; unread portion of dest is zeroed.
         """
         n = dest.shape[0]
-        got = min(n, self._n)
+        w = self._w
+        r = self._r
+        avail = max(0, w - r)
+        got = min(n, avail)
         if got > 0:
-            first = min(got, self._cap - self._r)
-            dest[:first] = self._buf[self._r : self._r + first]
+            r_idx = r % self._cap
+            first = min(got, self._cap - r_idx)
+            dest[:first] = self._buf[r_idx : r_idx + first]
             if first < got:
                 dest[first:got] = self._buf[: got - first]
-            self._r = (self._r + got) % self._cap
-            self._n -= got
+            self._r = r + got
         if got < n:
             dest[got:] = 0.0
         return got

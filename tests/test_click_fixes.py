@@ -82,7 +82,7 @@ def test_cofilite_buffer_shift_continuity():
     assert large_jumps == 0, f"Discontinuities ({large_jumps}) detected in CoFi-Lite output"
 
 
-def test_output_sink_underrun_no_synthetic_silence():
+def test_output_sink_underrun_recovery():
     dev = DeviceInfo(
         index=0, name="test", hostapi="test", max_input=0, max_output=2,
         default_rate=48000.0, is_default_input=False, is_default_output=True
@@ -93,8 +93,34 @@ def test_output_sink_underrun_no_synthetic_silence():
     outdata = np.zeros((480, 2), dtype=np.float32)
     sink._callback(outdata, 480, None, None)
 
-    assert sink.ring.fill == 0, "Underrun should not inject silence into live ring buffer"
     assert sink.underruns == 1
+    # On dry underrun, cushion must be re-armed to prevent a cascading zero-headroom death spiral
+    assert sink.ring.fill == sink.prefill
+    assert sink._needs_fade_in is True
+
+
+def test_drift_correction_does_not_count_as_underrun():
+    """Verify intentional 1-sample drift correction is NEVER misclassified as an underrun/glitch."""
+    dev = DeviceInfo(
+        index=0, name="test", hostapi="test", max_input=0, max_output=2,
+        default_rate=48000.0, is_default_input=False, is_default_output=True
+    )
+    sink = OutputSink(SinkSpec("test", dev, enabled=True, gain_db=0.0), 48000, 480, 2.5)
+    sink._active = True
+
+    # Preload buffer with sufficient audio
+    sink.ring.write(np.zeros(2000, dtype=np.float32))
+
+    # Trigger drift correction in negative direction (want = frames - 1 = 479)
+    sink._drift_cooldown = 50
+    sink._avg_fill = sink.prefill + 0.5 * 480 - int(0.6 * 480)
+
+    outdata = np.zeros((480, 2), dtype=np.float32)
+    sink._callback(outdata, 480, None, None)
+
+    # Must increment clock corrections, NOT underruns!
+    assert sink.corrections == 1
+    assert sink.underruns == 0, "Intentional 1-sample drift stretch must NEVER be counted as a glitch!"
 
 
 def test_drift_correction_smoothness():
@@ -109,8 +135,8 @@ def test_drift_correction_smoothness():
     smooth = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
     sink.ring.write(smooth)
 
-    sink._drift_cooldown = 200
-    sink._avg_fill = sink.prefill + 480 + int(3.0 * 480)
+    sink._drift_cooldown = 50
+    sink._avg_fill = sink.prefill + 0.5 * 480 + int(0.6 * 480)
 
     outdata = np.zeros((480, 2), dtype=np.float32)
     sink._callback(outdata, 480, None, None)

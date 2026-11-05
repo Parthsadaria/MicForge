@@ -125,7 +125,7 @@ class OutputSink:
     def _prime(self) -> None:
         self.ring.clear()
         self.prefill = self.base_prefill
-        self._avg_fill = float(self.prefill)
+        self._avg_fill = float(self.prefill + 0.5 * self.block)
         self._drift_cooldown = 0
         self._consecutive_underruns = 0
         self._last_underrun_time = 0.0
@@ -158,7 +158,7 @@ class OutputSink:
         Prevents the drift detector from misinterpreting a brief DSP swap
         pause as a physical hardware clock drift, stopping false clock fixes.
         """
-        self._avg_fill = float(self.ring.fill)
+        self._avg_fill = float(self.prefill + 0.5 * self.block)
         self._drift_cooldown = 0
         self._consecutive_underruns = 0
         self._stable_blocks = 0
@@ -169,7 +169,7 @@ class OutputSink:
                 # Arm the output sink with jitter cushion on the first incoming audio block
                 self.ring.clear()
                 self.ring.write(self._silence[:self.prefill])
-                self._avg_fill = float(self.prefill)
+                self._avg_fill = float(self.prefill + 0.5 * self.block)
                 self._drift_cooldown = 0
                 self.underruns = 0
                 self._active = True
@@ -192,18 +192,21 @@ class OutputSink:
             return
 
         fill = self.ring.fill
-        self._avg_fill = 0.995 * self._avg_fill + 0.005 * fill
+        self._avg_fill = 0.99 * self._avg_fill + 0.01 * fill
         self._drift_cooldown += 1
 
         want = frames
-        target_fill = self.prefill + frames
-        # Clock drift: low-pass filtered drift check with 1.5 s cooldown (150 blocks @ 10 ms)
-        # Nudges read length by 1 sample only on sustained real drift (>2.5 blocks deviation).
-        if self._drift_cooldown >= 150:
-            if self._avg_fill > target_fill + int(2.5 * frames):
+        target_fill = self.prefill + 0.5 * frames
+        deadband = int(0.4 * frames)
+
+        # Clock drift: continuous low-pass drift tracking with 200 ms cooldown (20 blocks @ 10 ms).
+        # Nudges read length by 1 sample only on sustained real drift (>0.4 blocks deviation).
+        # Allows smoothly correcting up to 5 samples/sec (104 ppm drift), easily matching any PC hardware.
+        if self._drift_cooldown >= 20:
+            if self._avg_fill > target_fill + deadband:
                 want = frames + 1
                 self._drift_cooldown = 0
-            elif self._avg_fill < target_fill - int(1.8 * frames) and fill >= frames + 1:
+            elif self._avg_fill < target_fill - deadband and fill >= frames:
                 want = frames - 1
                 self._drift_cooldown = 0
 
@@ -215,7 +218,10 @@ class OutputSink:
 
         got = self.ring.read_into(self._read_buf[:want])
 
-        if got < frames:
+        # CRITICAL FIX: An underrun ONLY occurs if we got fewer samples than we requested (got < want).
+        # Previously, checking `got < frames` when `want == frames - 1` misidentified intentional
+        # 1-sample drift corrections as underruns, triggering a cascading starvation loop!
+        if got < want:
             self.underruns += 1
             now = time.monotonic()
 
@@ -237,10 +243,13 @@ class OutputSink:
             self._last_underrun_time = now
             self._stable_blocks = 0
 
-            # 3. Re-arm cushion: DON'T inject silence into the live stream!
-            # Instead, just reset the fill tracker so the next push() naturally rebuilds
-            # the cushion. Injecting silence mid-stream was a major source of clicks.
-            self._avg_fill = float(self.ring.fill)
+            # 3. Re-arm cushion if buffer starved to prevent runaway starvation
+            if fill == 0 or got == 0:
+                self.ring.clear()
+                self.ring.write(self._silence[:self.prefill])
+                self._avg_fill = float(target_fill)
+            else:
+                self._avg_fill = float(self.ring.fill)
             self._drift_cooldown = 0
             self._needs_fade_in = True
         else:
@@ -251,18 +260,13 @@ class OutputSink:
                 self._stable_blocks = 2000
 
         # Smooth resume fade-in when recovering from an underrun (prevents leading edge click)
-        if self._needs_fade_in and got >= frames:
-            flen = min(frames, self._fade_samples)
+        if self._needs_fade_in and got >= want:
+            flen = min(got, self._fade_samples)
             fade = np.arange(1, flen + 1, dtype=np.float32) / flen
             self._read_buf[:flen] *= fade
             self._needs_fade_in = False
 
-        # Write to output: simple direct copy (no per-sample crossfade for drift correction)
-        # Drift correction uses want != frames, meaning we read 1 extra or 1 fewer sample.
-        # For "drop 1 sample": we read frames+1 samples but only output frames.
-        #   Use linear interpolation to smoothly squeeze frames+1 into frames.
-        # For "insert 1 sample": we read frames-1 samples but need to output frames.
-        #   Use linear interpolation to smoothly stretch frames-1 into frames.
+        # Write to output: fractional linear interpolation resampling for clock drift
         if want == frames + 1 and got >= frames + 1:
             # Squeeze frames+1 samples into frames output samples via linear interpolation
             src = self._read_buf[:frames + 1]
@@ -281,6 +285,12 @@ class OutputSink:
             self.corrections += 1
         else:
             outdata[:frames, 0] = self._read_buf[:frames]
+
+        # Track last output sample for continuity
+        self._last_sample = outdata[frames - 1, 0]
+
+        if self.channels > 1:
+            outdata[:, 1:] = outdata[:, :1]
 
         # Track last output sample for continuity
         self._last_sample = outdata[frames - 1, 0]
