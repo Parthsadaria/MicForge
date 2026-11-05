@@ -66,13 +66,16 @@ scratch/
 tmp/
 temp/
 
-# Audio test clips & recordings (prevent pushing heavy audio files)
+# Audio test clips, recordings & test artifacts (prevent pushing heavy files)
 *.wav
 *.mp3
 *.flac
 *.ogg
 *.aac
 *.m4a
+test_audio/
+test_audios/
+outputs/
 
 # Heavy PyTorch research checkpoints & external repos
 external/

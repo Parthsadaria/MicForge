@@ -74,8 +74,11 @@ def _reductions(snap: EngineSnapshot, width: int) -> Table:
     tbl.add_column(width=8, justify="right")
     for label, stage, key, color in rows:
         if stage in tel:
-            v = tel[stage].get(key, 0.0)
-            tbl.add_row(label, reduction_bar(v, bar_w, 24.0, color), f"-{v:4.1f} dB")
+            if stage == "denoise" and tel[stage].get("napping", 0.0) > 0.5:
+                tbl.add_row(label, Text("💤 IDLE NAP (0% CPU)".ljust(bar_w), style="dim cyan"), "-40 dB")
+            else:
+                v = tel[stage].get(key, 0.0)
+                tbl.add_row(label, reduction_bar(v, bar_w, 24.0, color), f"-{v:4.1f} dB")
         else:
             tbl.add_row(label, Text("off".ljust(bar_w), style="grey37"), "")
     gate = tel.get("gate")

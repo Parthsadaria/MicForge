@@ -1,33 +1,35 @@
 # Micforge
 
-[![Version](https://img.shields.io/badge/version-1.1.0-0284c7.svg)](version%20notes/v1.1.0.md)
+[![Version](https://img.shields.io/badge/version-1.1.1-0284c7.svg)](version%20notes/v1.1.1.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-emerald.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-65%2F65%20passing-teal.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-74%2F74%20passing-teal.svg)](tests/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-neutral.svg)]()
 
-> **Real-time, ultra-low latency speech enhancement and digital signal processing engine for voice communication and broadcasting.**  
+> **Real-time, low-latency speech enhancement and DSP engine for voice chat, streaming and gaming.**  
 > Built and maintained by **[Parth Sadaria](https://github.com/Parthsadaria)**.
 
 ---
 
 ## Overview
 
-**Micforge** is an open-source, local-first real-time audio processor designed to transform entry-level and untreated microphones into studio-grade broadcast signals. It combines classical multi-stage dynamic DSP with **[CoFi-Lite](https://github.com/Acceleration123/CoFi-Lite)**, an ultra-lightweight causal neural speech enhancement model.
+**Micforge** is an open-source, local-first real-time audio processor that makes entry-level and untreated microphones sound cleaner and clearer. It combines a classical multi-stage dynamics/EQ chain with a **small neural speech-enhancement model** based on the **[CoFi-Lite](https://arxiv.org/abs/2607.10142)** architecture, and falls back to a classical spectral Wiener denoiser when the neural model is unavailable.
 
-The engine executes completely on the local CPU with **zero cloud dependencies**, maintains a memory footprint **under 100 MB RAM**, delivers **sub-70 ms roundtrip latency**, and routes processed audio directly into Discord, OBS Studio, Zoom, and games via standard virtual audio cables.
+Everything runs on the local CPU with **no cloud dependencies**. On a Ryzen 7 the whole process uses **about 100 MB of RAM** and mic-to-virtual-cable latency is **about 68 ms\***. Processed audio is routed into Discord, OBS Studio, Zoom and games through a standard virtual audio cable.
+
+> \* Measured on an AMD Ryzen 7 machine (Windows, 48 kHz). See [Notes on measurements](#notes-on-measurements).
 
 ```
                   ┌────────────────────── 8-Stage DSP Signal Chain ──────────────────────┐
                   │                                                                      │
-Microphone Input ─┼─▶ High-Pass Filter (80 Hz)                                           │
-                  │   └─▶ CoFi-Lite Neural Denoiser (or Spectral Wiener)                 │
+Microphone Input ─┼─▶ High-Pass Filter (4th-order, 90 Hz default)                        │
+                  │   └─▶ Neural Denoiser (or Spectral Wiener fallback)                  │
                   │       └─▶ Downward Expander / Noise Gate                             │
-                  │           └─▶ 3-Band Parametric EQ (De-mud / Presence / Air)         │
-                  │               └─▶ Split-Band De-Esser (6.5 kHz)                      │
-                  │                   └─▶ Optical RMS Auto-Leveler                       │
-                  │                       └─▶ Feed-Forward Fast Compressor               │
-                  │                           └─▶ True Peak Lookahead Limiter (-1 dBFS)  │
+                  │           └─▶ Parametric EQ (De-mud / Presence / Air)                │
+                  │               └─▶ Split-Band De-Esser                                │
+                  │                   └─▶ Slow RMS Auto-Leveler                          │
+                  │                       └─▶ Feed-Forward Compressor                    │
+                  │                           └─▶ Peak Limiter (hard-clip safety)        │
                   └───────────────────────────────────┬──────────────────────────────────┘
                                                       │
                                                       ├──▶ Virtual Cable Output ──▶ Discord / OBS / Games
@@ -38,13 +40,15 @@ Microphone Input ─┼─▶ High-Pass Filter (80 Hz)                          
 
 ## Key Capabilities
 
-- **Hybrid Noise Suppression:** Erases non-stationary acoustic noise (mechanical key switches, fan turbulence, street noise, room reverberation) using an optimized **CoFi-Lite** ONNX neural network, with instantaneous on-the-fly fallback to classical spectral subtraction.
-- **Ultra-Low Latency:** Engineered for real-time interactive voice chat and competitive gaming, achieving **67.6 ms** roundtrip pipeline latency with the neural model and **47.6 ms** with classical filtering.
-- **Glitch-Resistant Audio Pipeline:** Active sink gating and moving-average clock drift compensation significantly reduce startup buffer underruns and sample synchronization drift across mismatched hardware clocks.
-- **Windows System Tray Daemon (`--tray`):** Operates silently in the background with a dynamic taskbar icon reflecting microphone state (Active, Muted, Bypassed).
-- **System-Wide Global Hotkeys:** Low-level OS keyboard hooks capture commands (`Ctrl+Shift+M` mute toggle, `Ctrl+Shift+B` bypass toggle, Push-to-Talk) across all windows, including fullscreen 3D applications.
-- **Isolated Feedback Chimes:** Procedural, click-free audio cues (*blip* on mute, *chirp* on unmute) synthesized in-memory and routed exclusively to the headphone monitor—never broadcast to the virtual microphone stream.
-- **Settings & Hotkeys GUI:** Built-in dark-themed graphical interface (`micforge settings`) for visual hotkey assignment, chime volume adjustment, and Windows boot autostart configuration.
+- **Hybrid noise suppression:** Suppresses steady and non-stationary background noise (fans, keyboard clatter, street noise) with a lightweight ONNX neural model, with a one-key hot-swap to classical spectral Wiener denoising.
+- **Low latency:** About **67.6 ms\*** mic-to-virtual-cable latency with the neural model and **47.6 ms\*** with classical filtering.
+- **Glitch-resistant audio pipeline:** Startup sink gating and a moving-average clock-drift compensator reduce startup underruns and sample drift between mismatched hardware clocks.
+- **Windows system tray daemon (`--tray`):** Runs in the background with a taskbar icon reflecting mic state (Active, Muted, Bypassed).
+- **Global hotkeys:** OS-level keyboard hooks (`Ctrl+Shift+M` mute, `Ctrl+Shift+B` bypass, push-to-talk) work across most applications. Exclusive-fullscreen games and anti-cheat–protected titles may block keyboard hooks; use borderless/windowed mode if hotkeys don't register.
+- **Isolated feedback chimes:** Procedural, click-free cues (*blip* on mute, *chirp* on unmute) are synthesized in memory and sent only to the headphone monitor, never to the virtual microphone.
+- **Settings GUI:** A dark-themed interface (`micforge settings`) for hotkeys, chime volume and Windows autostart.
+
+> **Realistic expectations:** Micforge cleans up noise, levels and tone. It cannot restore high frequencies a microphone never captured. Mic placement (about a fist from your mouth) still matters more than any filter.
 
 ---
 
@@ -52,10 +56,10 @@ Microphone Input ─┼─▶ High-Pass Filter (80 Hz)                          
 
 ### 1. Prerequisites
 - **Python 3.10** or higher
-- A virtual audio cable driver to route processed output to your voice software:
-  - **Windows:** [VB-CABLE Driver](https://vb-audio.com/Cable/) *(Recommended, Free)*
+- A virtual audio cable driver to route processed output into your voice software:
+  - **Windows:** [VB-CABLE Driver](https://vb-audio.com/Cable/) *(recommended, free)*
   - **macOS:** [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) (`brew install blackhole-2ch`)
-  - **Linux:** Native ALSA / PulseAudio null-sink (`pactl load-module module-null-sink sink_name=micforge`)
+  - **Linux:** PulseAudio/PipeWire null sink (`pactl load-module module-null-sink sink_name=micforge`)
 
 ### 2. Installation
 ```bash
@@ -63,29 +67,25 @@ git clone https://github.com/Parthsadaria/MicForge.git
 cd MicForge
 pip install -e .
 ```
-*(On Debian/Ubuntu: `sudo apt install libportaudio2` | On macOS: `brew install portaudio`)*
+*(Debian/Ubuntu: `sudo apt install libportaudio2` · macOS: `brew install portaudio`)*
 
 ### 3. Setup & Calibration
 ```bash
-# Verify environment and audio driver health
-micforge doctor
-
-# Select your physical microphone, virtual cable, and optional headphones
-micforge setup
-
-# Sample room ambient profile for 3 seconds (calibrates denoiser and gate)
-micforge calibrate
-
-# Start the interactive terminal dashboard
-micforge run
+micforge doctor      # verify environment and audio drivers
+micforge setup       # pick physical mic, virtual cable and headphones
+micforge calibrate   # sample room noise for a few seconds (sets the gate threshold)
+micforge run         # start the terminal dashboard
 ```
 
-### 4. Application Configuration
-In Discord, OBS Studio, Steam, or Zoom:
-1. Set **Input Device** to `CABLE Output (VB-Audio Virtual Cable)`.
-2. Disable downstream noise suppression (e.g. Discord Krisp / Standard), Echo Cancellation, and Automatic Gain Control to avoid redundant double-processing.
+> **Windows tip:** use the **WASAPI** entries for your mic and for `CABLE Input` in `micforge setup`. The legacy MME entries add latency and cause clock drift.
 
-To run Micforge permanently in the background:
+### 4. Application Configuration
+In Discord, OBS Studio, Steam or Zoom:
+1. Set **Input Device** to `CABLE Output (VB-Audio Virtual Cable)`.
+2. Turn off downstream **Noise Suppression** and **Automatic Gain Control** to avoid double processing.
+3. **Echo Cancellation:** leave it **on** if you use speakers; it is safe to turn off with headphones.
+
+To run Micforge in the background:
 ```bash
 micforge --tray
 ```
@@ -94,10 +94,10 @@ micforge --tray
 
 ## Live Terminal Dashboard
 
-Running `micforge run` launches a full-screen, low-overhead terminal dashboard rendered via Rich:
+`micforge run` opens a full-screen Rich dashboard (illustrative layout):
 
 ```
-╭─ MIC ENHANCER ───────── PRESET: discord ────────── MODEL: CoFi-Lite (Neural) ─╮
+╭─ MIC ENHANCER ───────── PRESET: discord ────────── MODEL: neural ─────────────╮
 │ IN   [-42.1 dBFS]  █████████████································              │
 │ OUT  [-18.4 dBFS]  ████████████████████████████················  PEAK HOLD    │
 │ GR   [ -8.2 dB  ]  ████████····································  GATE: OPEN   │
@@ -105,7 +105,7 @@ Running `micforge run` launches a full-screen, low-overhead terminal dashboard r
 │ SPECTRUM (raw vs processed)                                                   │
 │   100 Hz       500 Hz        1 kHz         4 kHz        10 kHz       16 kHz   │
 ├───────────────────────────────────────────────────────────────────────────────┤
-│ latency   ~ 67.6 ms        noise floor  -64.2 dBFS                            │
+│ latency   ~ 67.6 ms*       noise floor  -64.2 dBFS                            │
 │ dsp load  ███·······  18%  input gain   +2.0 dB                               │
 │ glitches  0                clock fixes  0                                     │
 ╰───────────────────────────────────────────────────────────────────────────────╯
@@ -114,65 +114,86 @@ Running `micforge run` launches a full-screen, low-overhead terminal dashboard r
 ### Interactive Controls
 | Key | Action | Key | Action |
 |:---:|:---|:---:|:---|
-| `b` | Toggle A/B Bypass (raw mic vs processed) | `c` | Calibrate ambient room noise (3 sec) |
-| `x` | Mute / Unmute microphone | `+` / `-` | Adjust denoiser reduction strength |
-| `l` | Toggle real-time headphone monitoring | `[` / `]` | Adjust input gain (±1 dB) |
-| `p` | Cycle voice presets (*discord*, *clean*, *podcast*) | `m` | Hot-swap denoiser (CoFi-Lite ⟷ Wiener) |
-| `q` | Exit application | | |
+| `b` | Toggle A/B bypass (raw vs processed) | `c` | Calibrate room noise (3 s) |
+| `x` | Mute / unmute microphone | `+` / `-` | Adjust denoiser strength |
+| `l` | Toggle headphone monitoring | `[` / `]` | Input gain (±1 dB) |
+| `p` | Cycle presets | `m` | Hot-swap denoiser (neural ⟷ Wiener) |
+| `q` | Quit | | |
 
 ---
 
-## Engineering & Architecture Deep Dive
+## Engineering Notes
 
-### 1. Latency Optimization Pipeline
-Standard real-time Python audio pipelines frequently incur 120 ms+ latency due to driver double-buffering, high STFT lookahead windows, and conservative circular buffers.
+### 1. Latency
+Real-time Python audio pipelines often end up well above 100 ms because of driver double-buffering, long STFT windows and conservative jitter buffers.
 
-Micforge v1.1.0 reduces end-to-end latency to **67.6 ms** (CoFi-Lite) and **47.6 ms** (Spectral Wiener) through:
-- **Causal STFT Delay Minimization:** Restructured the causal lookahead window inside the neural feature extractor, lowering algorithmic group delay from 2,335 samples (48.6 ms) to 1,470 samples (30.6 ms) at 48 kHz.
-- **Jitter Cushion Optimization:** Tuned the default PortAudio ring-buffer safety cushion to **1.5 blocks (15 ms)** for ultra-low latency, with configurable headroom (`jitter_blocks` in config) for systems experiencing high DPC latency or background CPU spikes.
-- **Hardware-Accurate Profiling:** Latency calculation reflects actual hardware FIFO queue occupancy rather than driver theoretical allowances.
+Micforge v1.1.1 reaches about **67.6 ms\*** (neural) and **47.6 ms\*** (spectral Wiener) by:
+- **Reducing causal STFT delay:** algorithmic group delay of the neural path reduced from 2,335 samples (48.6 ms) to 1,470 samples (30.6 ms) at 48 kHz.
+- **Smaller jitter cushion:** default output buffer of **1.5 blocks (15 ms)**, configurable via `jitter_blocks`.
+- **Measuring real buffer occupancy** instead of driver-reported theoretical latency.
 
-### 2. Startup Gating & Clock Drift Compensation
-- **Active Sink Gating:** Output streams are held in a gated idle state until the input stream captures and delivers its initial valid audio frame. This suppresses the burst of initial buffer underruns (~50+ false glitches) commonly reported when WASAPI output sinks start before input hardware is ready.
-- **Moving-Average Drift Synchronization:** Audio hardware clocks inherently experience subtle frequency variances (e.g., a 48,000.2 Hz USB microphone paired with a 47,999.7 Hz onboard DAC). Micforge employs a linear-algebra moving-average estimator that dynamically applies micro-resampling to prevent cumulative clock drift.
-- **Zero Heap Allocations in Callbacks:** DSP execution loops operate strictly on pre-allocated NumPy contiguous arrays within PortAudio real-time callbacks to avoid Python garbage-collection hiccups.
+### 2. Startup Gating & Clock-Drift Compensation
+- **Sink gating:** output streams stay idle until the input stream delivers its first frame, which suppresses the burst of startup underruns seen when WASAPI outputs start before the input is ready.
+- **Drift compensation:** independent hardware clocks drift apart slowly. Micforge keeps a moving average of output-buffer occupancy and applies small sample-level corrections to keep it centred.
+- **Allocation-light callbacks:** DSP state is preallocated; the remaining per-block NumPy temporaries are small and short-lived.
 
 > [!TIP]
-> **Dealing with audio crackles or glitches?** Real-time audio performance is highly sensitive to system load, USB controller bandwidth, and Windows DPC latency (especially under heavy GPU gaming load). If your dashboard reports rising glitch counters or you hear audio stutter, open `%APPDATA%\micforge\config.json` and increase `"jitter_blocks"` from `1.5` to `2.5` or `3.0`.
+> **Crackles or rising glitch counter?** Real-time audio is sensitive to CPU load, USB bandwidth and Windows DPC latency. Make sure mic and cable use **WASAPI**, close heavy background apps, then raise `"jitter_blocks"` in `%APPDATA%\micforge\config.json` (e.g. from `1.5` to `2.5` or `3.0`).
 
-### 3. Neural Architecture: CoFi-Lite
-- **Parameters:** ~83,000 parameters (~600 KB compiled ONNX binary).
-- **Inference Complexity:** 12.87M MACs/sec running via float32 SIMD ONNX Runtime.
-- **Memory Consumption:** ~65–75 MB resident RAM, allowing permanent background execution without impacting gaming performance.
-- **Model Tooling:**
+### 3. Neural Model
+- **Architecture:** CoFi-Lite (per the paper: ~83 k parameters, 12.87 M MACs/s), running through ONNX Runtime on one CPU thread.
+- **Resource use:** the whole Micforge process uses about **100 MB RAM\*** (Python, NumPy/SciPy and ONNX Runtime dominate; the model itself is under 1 MB).
+- **Processing rate:** the model runs at 16 kHz internally.
+- **Tooling:**
   ```bash
-  micforge model info                               # Inspect loaded ONNX architecture
-  micforge model export checkpoint.tar model.onnx  # Export PyTorch weights to standalone ONNX
-  micforge process input.wav output.wav -p studio  # Offline batch processing
+  micforge model info                               # inspect the loaded ONNX model
+  micforge model export checkpoint.tar model.onnx  # export a PyTorch checkpoint to ONNX
+  micforge process input.wav output.wav -p studio  # offline batch processing
   ```
 
-### 4. Isolated In-Memory Audio Feedback
-Feedback chimes are procedurally synthesized on demand using logarithmic sine sweeps with smooth half-Hanning window envelopes to eliminate edge clicks:
-- **Mute Cue:** $460\text{ Hz} \to 280\text{ Hz}$ descending sweep.
-- **Unmute Cue:** $280\text{ Hz} \to 540\text{ Hz}$ ascending sweep.
-- **Architectural Routing:** Chimes are injected strictly into the monitor audio sink downstream of the virtual cable split. The virtual cable sink never receives chime samples, ensuring zero spillover into voice calls.
+#### Model provenance
+The neural denoiser uses the **CoFi-Lite** architecture. The upstream authors released their source code and a checkpoint trained on a simulated DNS3 dataset on **2026-10-19** ([github.com/Acceleration123/CoFi-Lite](https://github.com/Acceleration123/CoFi-Lite)). `models/cofilite.onnx` is exported from that official checkpoint (see `micforge model export`). To use a different or newer checkpoint, export it to ONNX and pass it with `--model`.
+
+- **Training data:** the released checkpoint was trained on simulated DNS3 data, so results on your real microphone and room may differ from the paper's benchmarks. Use `micforge test` and the `m` key (neural vs Wiener) to compare on your own voice.
+- **License:** the bundled model is derived from the upstream checkpoint and is subject to **its** license terms, not necessarily this project's MIT license. Check the upstream repository's license before redistributing the model file or using it commercially.
+
+Reference: L. Yang, D. Wang, X. Rong, J. Zhao, J. Lu, *CoFi-Lite: Pushing the Limits of Ultra-Lightweight Speech Enhancement*, IEEE Signal Processing Letters, 2026 ([arXiv:2607.10142](https://arxiv.org/abs/2607.10142)).
+
+### 4. Isolated Feedback Chimes
+Cues are synthesized on demand with logarithmic sine sweeps and half-Hann envelopes to avoid edge clicks:
+- **Mute:** 460 Hz → 280 Hz descending sweep.
+- **Unmute:** 280 Hz → 540 Hz ascending sweep.
+- **Routing:** chimes go only to the monitor sink; the virtual cable never receives them.
 
 ---
 
-## DSP Signal Processing Specification
+## DSP Specification
 
-The audio engine processes signals in 32-bit floating point through 8 discrete stages:
+The engine processes 32-bit float audio through eight stages (default `discord` preset shown; all values are configurable):
 
-| Stage | Algorithm | Function | Key Parameters |
+| Stage | Algorithm | Function | Defaults |
 |:---|:---|:---|:---|
-| **1. High-Pass** | 2nd-order Butterworth Biquad | Rejection of mechanical sub-rumble and proximity thumps | $f_c = 80\text{ Hz}$, $Q = 0.707$ |
-| **2. Denoise** | CoFi-Lite Neural / STFT Wiener | Suppression of stationary and non-stationary acoustic noise | $16\text{ kHz}$ internal, causal overlap-add |
-| **3. Gate** | Downward Expander with Hysteresis | Attenuation of room reverberation and breath intake | Soft-knee, dynamic floor calibration |
-| **4. Parametric EQ** | 3-Band Biquad Cascade | Tonal correction (de-mud, vocal presence, top-end air) | 300 Hz ($-3\text{ dB}$), 3.2 kHz ($+2.5\text{ dB}$), 10 kHz ($+2\text{ dB}$) |
-| **5. De-Esser** | Split-Band Dynamic Attenuator | Transparent suppression of harsh vocal sibilance | $f_c = 6.5\text{ kHz}$, fast RMS envelope detection |
-| **6. Leveler** | Slow Optical-Style RMS Leveler | Normalization of conversational dynamics (whispers vs shouts) | $\tau = 1.2\text{ s}$ time constant |
-| **7. Compressor** | Feed-Forward VCA Emulation | Transient control and vocal consistency | $20\text{ ms}$ attack, $100\text{ ms}$ release, soft knee |
-| **8. Limiter** | True Peak Lookahead Brickwall | Guaranteed prevention of digital overs and DAC clipping | Threshold: $-1.0\text{ dBFS}$ |
+| **1. High-pass** | 4th-order Butterworth (two cascaded biquads) | Removes rumble and desk thumps | 90 Hz |
+| **2. Denoise** | Neural model, or STFT Wiener with minimum-statistics noise tracking | Noise suppression | 16 kHz internal (neural) |
+| **3. Gate** | Soft downward expander with hold and hysteresis | Attenuates residual noise between phrases | Threshold set by `calibrate` (default −52 dBFS), 20 dB range |
+| **4. Parametric EQ** | Biquad cascade | De-mud, presence, air | 300 Hz −2.5 dB · 3.2 kHz +3 dB · 9 kHz high shelf +3 dB |
+| **5. De-esser** | Split-band dynamic attenuator | Tames harsh sibilance | ~7 kHz band |
+| **6. Leveler** | Slow RMS auto-gain | Evens out quiet vs loud speech | Attack ~0.25 s, release ~1.5 s, up to +9 dB |
+| **7. Compressor** | Feed-forward, soft knee | Transient control, consistency | 3:1, 6 ms attack, 90 ms release |
+| **8. Limiter** | Peak limiter with hard-clip safety | Prevents digital overs | Ceiling −1.5 dBFS |
+
+---
+
+## Notes on measurements
+
+Figures marked with **\*** were measured on a single machine and will vary:
+
+| Metric | Value | Conditions |
+|:---|:---|:---|
+| End-to-end latency (mic → virtual cable) | **67.6 ms\*** neural · **47.6 ms\*** spectral | AMD Ryzen 7, Windows, WASAPI mic and cable, 48 kHz |
+| Process RAM | **~100 MB\*** | Same machine, neural denoiser active |
+
+Latency depends heavily on your audio hardware, drivers, host API (WASAPI vs MME), `block_size` / `jitter_blocks`, and system load. It excludes the extra buffering added by the receiving app (Discord, OBS, …) and by the virtual cable driver. Run `micforge doctor` to see DSP speed and the latency reported on your machine.
 
 ---
 
@@ -183,76 +204,64 @@ micforge/
 ├── src/micforge/
 │   ├── analysis/
 │   │   ├── __init__.py
-│   │   └── stats.py             # Audio analysis, SNR calculation, and diagnostic heuristics
+│   │   └── stats.py             # Audio analysis, SNR calculation, diagnostic heuristics
 │   ├── audio/
 │   │   ├── __init__.py
-│   │   ├── backend.py           # Sounddevice / PortAudio interface bindings
-│   │   ├── cues.py              # Procedural sine-sweep feedback chimes (NumPy)
-│   │   ├── devices.py           # Audio device discovery, host API query, and pairing
-│   │   ├── engine.py            # Stream lifecycle, active sink gating, and drift sync
-│   │   ├── fileio.py            # High-throughput 32-bit WAV serialization
-│   │   ├── metrics.py           # Thread-safe RMS, peak hold, clipping, and telemetry
-│   │   ├── recorder.py          # Device calibration clip recording
-│   │   └── ring.py              # Lock-free circular jitter buffer implementation
+│   │   ├── backend.py           # sounddevice / PortAudio interface
+│   │   ├── cues.py              # Procedural sine-sweep feedback chimes
+│   │   ├── devices.py           # Device discovery, host-API query, virtual-cable detection
+│   │   ├── engine.py            # Stream lifecycle, sink gating, drift compensation
+│   │   ├── fileio.py            # WAV read/write
+│   │   ├── metrics.py           # RMS, peak hold, clipping, spectrum
+│   │   ├── recorder.py          # Recording and playback helpers
+│   │   └── ring.py              # Ring buffer between input and output streams
 │   ├── commands/
 │   │   ├── __init__.py
-│   │   ├── calibrate.py         # 3-second noise floor sampling and threshold calculation
-│   │   ├── common.py            # Shared CLI helpers and formatting utilities
-│   │   ├── devices_cmd.py       # Audio device listing and inspection command
-│   │   ├── doctor.py            # System configuration and driver diagnostic checks
-│   │   ├── files.py             # Offline WAV processing and audio analysis commands
-│   │   ├── live.py              # Real-time dashboard and background tray runner
-│   │   ├── test_mic.py          # Interactive loopback and mic comparison testing
-│   │   └── wizard.py            # First-run setup and configuration wizard
+│   │   ├── calibrate.py         # Room-noise sampling and gate threshold
+│   │   ├── common.py            # Shared CLI helpers
+│   │   ├── devices_cmd.py       # Device listing and setup
+│   │   ├── doctor.py            # Driver, device and performance diagnostics
+│   │   ├── files.py             # Offline WAV processing and analysis
+│   │   ├── live.py              # Real-time dashboard and tray runner
+│   │   ├── test_mic.py          # Record, compare and A/B playback
+│   │   └── wizard.py            # Interactive menu / first-run setup
 │   ├── dsp/
 │   │   ├── __init__.py
-│   │   ├── base.py              # Abstract Processor base class
-│   │   ├── biquad.py            # Direct Form II Transposed biquadratic filters
-│   │   ├── chain.py             # Composite DSP rack pipeline dispatcher
-│   │   ├── cofilite.py          # CoFi-Lite neural feature extractor and ONNX inference
-│   │   ├── compressor.py        # Feed-forward compressor and lookahead peak limiter
-│   │   ├── deesser.py           # Split-band dynamic sibilance attenuator
-│   │   ├── denoise.py           # Classical Spectral Wiener denoiser with minimum statistics
-│   │   ├── export_cofilite.py   # Checkpoint converter (PyTorch -> standalone ONNX)
-│   │   ├── gate.py              # Downward expander / noise gate with hysteresis
-│   │   ├── leveler.py           # Optical RMS automatic leveling amplifier
-│   │   └── util.py              # DSP mathematical utilities (dB conversion, curves)
+│   │   ├── base.py              # Processor base class
+│   │   ├── biquad.py            # Biquad filters (streaming SOS)
+│   │   ├── chain.py             # DSP chain assembly
+│   │   ├── cofilite.py          # Neural denoiser: feature extraction + ONNX inference
+│   │   ├── compressor.py        # Compressor and peak limiter
+│   │   ├── deesser.py           # Split-band de-esser
+│   │   ├── denoise.py           # Classical spectral Wiener denoiser
+│   │   ├── export_cofilite.py   # Checkpoint -> ONNX converter
+│   │   ├── gate.py              # Soft noise gate / downward expander
+│   │   ├── leveler.py           # Slow RMS auto-leveler
+│   │   └── util.py              # dB conversion and DSP helpers
 │   ├── models/
-│   │   └── cofilite.onnx        # Standalone pre-compiled neural model binary (<600 KB)
+│   │   └── cofilite.onnx        # Bundled model (see "Model provenance")
 │   ├── ui/
 │   │   ├── __init__.py
-│   │   ├── dashboard.py         # Full-screen Rich terminal studio dashboard
-│   │   ├── hotkeys.py           # Low-level Windows global keyboard hook manager
-│   │   ├── keys.py              # Cross-platform non-blocking console key reader
-│   │   ├── report.py            # Visual diagnostic report formatting
-│   │   ├── settings_gui.py      # Dark-themed Tkinter configuration interface
-│   │   ├── theme.py             # Design tokens and color palettes
-│   │   ├── tray.py              # Win32 system tray daemon and procedural icon renderer
-│   │   └── widgets.py           # Terminal meters, spectrum graphs, and sparklines
+│   │   ├── dashboard.py         # Rich terminal dashboard
+│   │   ├── hotkeys.py           # Global keyboard hook manager
+│   │   ├── keys.py              # Cross-platform console key reader
+│   │   ├── report.py            # Before/after report formatting
+│   │   ├── settings_gui.py      # Tkinter settings window
+│   │   ├── theme.py             # Colors and styles
+│   │   ├── tray.py              # System tray icon and menu
+│   │   └── widgets.py           # Meters, spectrum and bar widgets
 │   ├── util/
 │   │   ├── __init__.py
-│   │   └── autostart.py         # Windows Registry HKCU boot startup integration
-│   ├── __init__.py              # Package entry and version definition
-│   ├── __main__.py              # Package execution wrapper
-│   ├── cli.py                   # Argument parsing and command routing
-│   ├── config.py                # Schema, defaults, and configuration persistence
-│   ├── errors.py                # Typed exception hierarchy
-│   ├── logging_setup.py         # Diagnostic logging configuration
-│   ├── presets.py               # Built-in DSP preset profiles
-│   └── profile_store.py         # Calibrated ambient noise profile persistence
-├── tests/
-│   ├── conftest.py              # Pytest fixtures and mock environments
-│   ├── fake_sd.py               # Mock PortAudio sounddevice driver for CI testing
-│   ├── test_cofilite.py         # Neural model and feature extraction test suite
-│   ├── test_cues.py             # Audio feedback synthesis tests
-│   ├── test_dsp.py              # DSP biquad, filter, and dynamic processor unit tests
-│   ├── test_engine.py           # Ring buffer, audio engine, and gating tests
-│   ├── test_hotkeys.py          # Global hotkey and hook integration tests
-│   └── test_misc.py             # CLI, configuration, and preset validation tests
+│   │   └── autostart.py         # Windows boot autostart (HKCU Run key)
+│   ├── __init__.py  __main__.py  cli.py  config.py  errors.py
+│   └── logging_setup.py  presets.py  profile_store.py
+├── tests/                       # pytest suite with a fake PortAudio backend (no hardware needed)
+│   ├── conftest.py  fake_sd.py
+│   └── test_cofilite.py  test_cues.py  test_dsp.py  test_engine.py  test_hotkeys.py  test_misc.py
 ├── version notes/
-│   └── v1.1.0.md                # Comprehensive release notes and changelog
-├── pyproject.toml               # PEP 517/518 build metadata and dependency specification
-├── requirements.txt             # Direct development dependency requirements
+│   └── v1.1.1.md                # Release notes and changelog
+├── pyproject.toml
+├── requirements.txt
 └── README.md
 ```
 
@@ -264,76 +273,59 @@ micforge/
 usage: micforge [-h] [-v] [--debug] [--model MODEL] [--tray] <command> ...
 
 Commands:
-  run             Execute live processing pipeline (mic -> DSP -> virtual cable)
-  setup           Select input mic, virtual cable, and monitor headphones
-  calibrate       Analyze ambient room noise to establish gate and denoiser thresholds
-  doctor          Run diagnostic validation on audio drivers and host configuration
-  settings        Open graphical settings for hotkeys, audio chimes, and startup
-  loopback        Direct headphone monitor mode for real-time acoustic tuning
-  test            Record an 8-second speech sample and inspect before/after metrics
-  presets         List available voice presets or output profile JSON
-  process         Process an offline WAV file through the DSP pipeline
-  analyze         Analyze WAV file characteristics (RMS, noise floor, clarity)
-  model           Inspect or export CoFi-Lite neural ONNX checkpoints
-  devices         Display enumerated audio input and output devices
-  version         Print version and environment diagnostic information
+  run             Live pipeline (mic -> DSP -> virtual cable)
+  setup           Select mic, virtual cable and headphones
+  calibrate       Measure room noise; sets the gate threshold
+  doctor          Check drivers, devices and DSP performance
+  settings        Graphical settings: hotkeys, chimes, startup
+  loopback        Hear yourself live through headphones (A/B raw vs processed)
+  test            Record a short sample, show before/after metrics, play both back
+  presets         List presets or print one as JSON
+  process         Process a WAV file offline
+  analyze         Analyze a WAV file (level, noise, clarity)
+  model           Inspect or export the neural ONNX model
+  devices         List audio devices
+  version         Print version and environment info
 ```
 
 ---
 
-## Verification & Testing
+## Testing
 
-Micforge maintains a rigorous automated test suite. Audio drivers are mocked in software, allowing complete validation on headless systems without physical sound hardware:
+Audio drivers are mocked, so the suite runs on headless machines without sound hardware:
 
 ```bash
 pip install -e .[dev]
 pytest -v
 ```
 
-```
-============================== test session starts ==============================
-collected 65 items
-
-tests/test_cofilite.py ......                                            [  9%]
-tests/test_cues.py ...                                                   [ 13%]
-tests/test_dsp.py ....................................                   [ 69%]
-tests/test_engine.py ...                                                 [ 73%]
-tests/test_hotkeys.py ....                                               [ 80%]
-tests/test_misc.py .............                                         [100%]
-
-============================== 65 passed in ~23s ==============================
-```
-
 ---
 
-## Tech Stack & Upstream Projects
+## Built With
 
-Micforge stands on the shoulders of fantastic open-source libraries, neural architectures, and audio infrastructure:
-
-| Component | Project / Repository | Role in Micforge |
+| Component | Project | Role |
 |:---|:---|:---|
-| **Neural Speech Model** | [CoFi-Lite](https://github.com/Acceleration123/CoFi-Lite) | Core causal neural speech enhancement architecture and PyTorch checkpoints |
-| **Inference Engine** | [ONNX Runtime](https://github.com/microsoft/onnxruntime) & [ONNX](https://github.com/onnx/onnx) | Ultra-fast SIMD float32 CPU execution of the neural speech model |
-| **Audio I/O & Backend** | [sounddevice](https://github.com/spatialaudio/python-sounddevice) & [PortAudio](http://www.portaudio.com/) | Real-time, non-blocking audio stream bindings for WASAPI, ALSA, and CoreAudio |
-| **Numerical & DSP Math** | [NumPy](https://github.com/numpy/numpy) & [SciPy](https://github.com/scipy/scipy) | Vectorized DSP filter calculations, ring buffer operations, and procedural audio synthesis |
-| **Terminal Studio UI** | [Rich](https://github.com/Textualize/rich) | Studio ASCII meters, spectrum analyzer visualizer, and live dashboard rendering |
-| **System Tray Daemon** | [pystray](https://github.com/moses-palmer/pystray) | Windows system tray taskbar icon and context menu lifecycle |
-| **Dynamic Icon Drawing** | [Pillow (PIL)](https://github.com/python-pillow/Pillow) | In-memory procedural generation of dynamic 64×64 tray status icons |
-| **Global Input Hooks** | [pynput](https://github.com/moses-palmer/pynput) | Low-level OS keyboard event hooks for in-game and fullscreen hotkey capture |
-| **Graphical Interface** | [Tkinter](https://docs.python.org/3/library/tkinter.html) | Native Python desktop GUI toolkit powering the dark-mode settings window |
-| **Virtual Audio Drivers** | [VB-Audio Cable](https://vb-audio.com/Cable/) & [BlackHole](https://github.com/ExistentialAudio/BlackHole) | Loopback routing of processed audio into Discord, OBS, and VoIP clients |
-| **Test Framework** | [pytest](https://github.com/pytest-dev/pytest) | Automated test suite execution and fixture mocking |
+| Neural model | [CoFi-Lite](https://github.com/Acceleration123/CoFi-Lite) ([paper](https://arxiv.org/abs/2607.10142)) | Lightweight causal speech-enhancement architecture and released checkpoint |
+| Inference | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | CPU execution of the neural model |
+| Audio I/O | [sounddevice](https://github.com/spatialaudio/python-sounddevice) · [PortAudio](http://www.portaudio.com/) | Real-time streams (WASAPI, ALSA, CoreAudio) |
+| Numerics / DSP | [NumPy](https://github.com/numpy/numpy) · [SciPy](https://github.com/scipy/scipy) | Filters, FFTs, buffers, synthesis |
+| Terminal UI | [Rich](https://github.com/Textualize/rich) | Dashboard, meters, spectrum |
+| System tray | [pystray](https://github.com/moses-palmer/pystray) · [Pillow](https://github.com/python-pillow/Pillow) | Tray icon and menu |
+| Global hotkeys | [pynput](https://github.com/moses-palmer/pynput) | OS-level keyboard hooks |
+| Settings GUI | [Tkinter](https://docs.python.org/3/library/tkinter.html) | Settings window |
+| Virtual audio | [VB-CABLE](https://vb-audio.com/Cable/) · [BlackHole](https://github.com/ExistentialAudio/BlackHole) | Routing into Discord, OBS, VoIP |
+| Tests | [pytest](https://github.com/pytest-dev/pytest) | Test runner |
 
 ---
 
-## Author & Community
+## Author & Credits
 
-- **Lead Developer & Maintainer:** **[Parth Sadaria](https://github.com/Parthsadaria)**
-- **Neural Network Research:** Upstream model architecture design by the [CoFi-Lite Authors](https://github.com/Acceleration123/CoFi-Lite).
-- **Contributions & Feedback:** Bug reports, feature requests, and pull requests are warmly welcomed via the [GitHub Repository](https://github.com/Parthsadaria/MicForge).
+- **Lead developer & maintainer:** [Parth Sadaria](https://github.com/Parthsadaria)
+- **Neural model:** CoFi-Lite by Leyan Yang, Dahan Wang, Xiaobin Rong, Jiadong Zhao and Jing Lu. Micforge is not affiliated with the authors.
+- **Feedback & contributions:** issues and pull requests are welcome on [GitHub](https://github.com/Parthsadaria/MicForge).
 
 ---
 
 ## License
 
-This project is licensed under the **MIT License**. See the `LICENSE` file for details.
+Micforge is released under the **MIT License**; see `LICENSE`. Third-party components are governed by their own licenses: this includes the bundled `cofilite.onnx` (derived from the upstream CoFi-Lite checkpoint), VB-CABLE and BlackHole.

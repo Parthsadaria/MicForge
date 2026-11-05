@@ -62,7 +62,7 @@ class EQBand:
 @dataclass
 class DenoiseConfig:
     enabled: bool = True
-    strength: float = 0.6  # 0..1, how aggressively noise is attenuated
+    strength: float = 1.0  # 0..1, how aggressively noise is attenuated (1.0 = full neural suppression)
     max_reduction_db: float = 24.0  # attenuation floor per bin
     model_type: str = "cofilite"  # "cofilite" | "spectral"
     model_path: str | None = None  # path to swappable model file (.onnx or .tar)
@@ -71,7 +71,7 @@ class DenoiseConfig:
 @dataclass
 class GateConfig:
     enabled: bool = True
-    threshold_db: float = -52.0
+    threshold_db: float = -48.0  # soft expander threshold (eliminates ambient room tone/hiss in speech pauses)
     range_db: float = 20.0  # how far the gate closes (soft expander, not a hard mute)
     attack_ms: float = 3.0
     hold_ms: float = 80.0
@@ -179,7 +179,7 @@ class HotkeyConfig:
 class AppConfig:
     sample_rate: int = 48000
     block_size: int = 480  # 10 ms @ 48 kHz
-    jitter_blocks: float = 1.5  # output prefill in blocks; 1.5 = 15 ms low-latency cushion
+    jitter_blocks: float = 2.5  # output prefill in blocks; 2.5 = 25 ms balanced cushion (glitch-resistant)
     input_device: DeviceSpec = None  # name substring or index; None = system default
     output_device: DeviceSpec = None  # virtual cable (Discord reads its other end)
     monitor_device: DeviceSpec = None  # your headphones, for self-monitoring
@@ -205,9 +205,10 @@ class AppConfig:
                 f"Could not read {p}: {exc}",
                 hint=f"Delete {p} to reset to defaults.",
             ) from exc
-        # Default to ultra low-latency 1.5 blocks (15ms cushion)
-        if getattr(cfg, "jitter_blocks", 0) >= 2.0 or getattr(cfg, "jitter_blocks", 0) < 1.0:
-            cfg.jitter_blocks = 1.5
+        # Ensure balanced, glitch-resistant default of 2.5 blocks (25ms cushion)
+        jb = getattr(cfg, "jitter_blocks", 2.5)
+        if jb < 1.0 or jb > 8.0 or jb == 1.5:
+            cfg.jitter_blocks = 2.5
         cfg.validate()
         return cfg
 

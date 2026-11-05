@@ -28,7 +28,7 @@ def _de_muffle() -> ChainConfig:
         EQBand("peak", 5000, 3.0, 1.0),
         EQBand("highshelf", 8500, 5.0, 0.7),
     ]
-    cfg.denoise = DenoiseConfig(strength=0.5, max_reduction_db=16)
+    cfg.denoise = DenoiseConfig(strength=0.8, max_reduction_db=20)
     cfg.deesser.threshold_db = -34.0
     cfg.deesser.ratio = 4.0
     return cfg
@@ -37,8 +37,8 @@ def _de_muffle() -> ChainConfig:
 def _noisy_room() -> ChainConfig:
     cfg = _discord()
     cfg.highpass_hz = 110
-    cfg.denoise = DenoiseConfig(strength=0.85, max_reduction_db=28)
-    cfg.gate = GateConfig(threshold_db=-46, range_db=30, hold_ms=100)
+    cfg.denoise = DenoiseConfig(strength=1.0, max_reduction_db=28)
+    cfg.gate = GateConfig(threshold_db=-44, range_db=30, hold_ms=100)
     return cfg
 
 

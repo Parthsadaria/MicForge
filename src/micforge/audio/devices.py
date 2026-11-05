@@ -61,7 +61,23 @@ def list_devices(all_apis: bool = False) -> list[DeviceInfo]:
     """All devices; by default only those on the best host API available (hides MME/DirectSound dupes)."""
     sd = get_sd()
     apis = sd.query_hostapis()
+
+    # Identify default devices from the highest-priority Host API available.
+    # On Windows, this ensures WASAPI default devices are selected rather than legacy MME defaults.
+    sorted_apis = sorted(apis, key=lambda a: _priority(str(a.get("name", ""))))
+    best_in = next(
+        (a["default_input_device"] for a in sorted_apis if a.get("default_input_device", -1) >= 0),
+        -1,
+    )
+    best_out = next(
+        (a["default_output_device"] for a in sorted_apis if a.get("default_output_device", -1) >= 0),
+        -1,
+    )
+
     default_in, default_out = sd.default.device
+    effective_in = best_in if best_in >= 0 else default_in
+    effective_out = best_out if best_out >= 0 else default_out
+
     infos = []
     for i, d in enumerate(sd.query_devices()):
         infos.append(
@@ -72,8 +88,8 @@ def list_devices(all_apis: bool = False) -> list[DeviceInfo]:
                 max_input=int(d["max_input_channels"]),
                 max_output=int(d["max_output_channels"]),
                 default_rate=float(d["default_samplerate"]),
-                is_default_input=(i == default_in),
-                is_default_output=(i == default_out),
+                is_default_input=(i == effective_in),
+                is_default_output=(i == effective_out),
             )
         )
     if all_apis or not infos:
@@ -97,8 +113,12 @@ def find_device(spec: Any, kind: str, devices: list[DeviceInfo] | None = None) -
         raise DeviceError(f"No {kind} devices found.", hint="Plug one in, or run `micforge doctor`.")
 
     if spec in (None, ""):
-        default = [d for d in candidates if (d.is_default_input if kind == "input" else d.is_default_output)]
-        return (default or candidates)[0]
+        defaults = [d for d in candidates if (d.is_default_input if kind == "input" else d.is_default_output)]
+        if defaults:
+            defaults.sort(key=lambda d: (_priority(d.hostapi), d.index))
+            return defaults[0]
+        candidates.sort(key=lambda d: (_priority(d.hostapi), d.index))
+        return candidates[0]
 
     if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
         idx = int(spec)

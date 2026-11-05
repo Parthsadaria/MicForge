@@ -37,6 +37,14 @@ def run_live(
     tray: bool = False,
     no_tray: bool = False,
 ) -> None:
+    # Tune GC thresholds to prevent garbage collection pauses during real-time streaming
+    import gc
+    try:
+        gc.freeze()
+        gc.set_threshold(60000, 60, 60)
+    except Exception:
+        pass
+
     preset = preset or app.preset
     model_override = model or app.denoise_model
     devs = resolve_devices(
@@ -117,21 +125,25 @@ def run_live(
         if m_type == "spectral":
             new_dn = SpectralDenoiser(
                 app.sample_rate,
-                getattr(dn, "strength", 0.6),
+                getattr(dn, "strength", 1.0),
                 getattr(dn, "max_reduction_db", 24.0),
                 enabled=getattr(dn, "enabled", True),
             )
             engine.chain.stages = [new_dn if s.name == "denoise" else s for s in engine.chain.stages]
+            for s in engine.sinks.values():
+                s.notify_pipeline_change()
             flash("Swapped denoiser: Spectral Wiener (classical)")
         else:
             try:
                 new_dn = CoFiLiteDenoiser(
                     app.sample_rate,
-                    getattr(dn, "strength", 0.6),
+                    getattr(dn, "strength", 1.0),
                     getattr(dn, "max_reduction_db", 24.0),
                     model_path=model_override,
                 )
                 engine.chain.stages = [new_dn if s.name == "denoise" else s for s in engine.chain.stages]
+                for s in engine.sinks.values():
+                    s.notify_pipeline_change()
                 flash(f"Swapped denoiser: CoFi-Lite ({new_dn.model_name})")
             except Exception as e:
                 flash(f"CoFi-Lite load error: {e}", 3.0)

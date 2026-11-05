@@ -76,10 +76,13 @@ class OutputSink:
         self.spec = spec
         self.sr = sample_rate
         self.block = block_size
-        self.prefill = int(prefill_blocks * block_size)
+        self.base_prefill = int(prefill_blocks * block_size)
+        self.prefill = self.base_prefill
+        self.max_prefill = int(max(3.5, float(prefill_blocks) * 2.0) * block_size)
         self.ring = RingBuffer(sample_rate)  # 1 s of headroom
         self.enabled = spec.enabled
         self.gain = db2lin(spec.gain_db)
+        self._gain_is_unity = abs(self.gain - 1.0) < 1e-6
         self.underruns = 0
         self.corrections = 0
         self.stream: Any = None
@@ -87,6 +90,17 @@ class OutputSink:
         self._avg_fill = float(self.prefill)
         self._drift_cooldown = 0
         self._active = False
+        self._consecutive_underruns = 0
+        self._last_underrun_time = 0.0
+        self._needs_fade_in = False
+        self._fade_samples = min(32, block_size // 4)
+        self._stable_blocks = 0
+        # Pre-allocated read buffer to avoid allocation in the output callback
+        self._read_buf = np.zeros(block_size + 2, dtype=np.float32)
+        # Pre-allocated silence cushion to avoid allocation in underrun path
+        self._silence = np.zeros(self.max_prefill, dtype=np.float32)
+        # Track the last sample output for continuity checking
+        self._last_sample = np.float32(0.0)
 
     def open(self) -> None:
         sd = get_sd()
@@ -110,9 +124,15 @@ class OutputSink:
 
     def _prime(self) -> None:
         self.ring.clear()
+        self.prefill = self.base_prefill
         self._avg_fill = float(self.prefill)
         self._drift_cooldown = 0
+        self._consecutive_underruns = 0
+        self._last_underrun_time = 0.0
+        self._needs_fade_in = False
+        self._stable_blocks = 0
         self._active = False
+        self._last_sample = np.float32(0.0)
 
     def start(self) -> None:
         self.stream.start()
@@ -132,17 +152,32 @@ class OutputSink:
             self._prime()
         self.enabled = on
 
+    def notify_pipeline_change(self) -> None:
+        """Reset drift detector cooldown and alignment on preset or model swap.
+
+        Prevents the drift detector from misinterpreting a brief DSP swap
+        pause as a physical hardware clock drift, stopping false clock fixes.
+        """
+        self._avg_fill = float(self.ring.fill)
+        self._drift_cooldown = 0
+        self._consecutive_underruns = 0
+        self._stable_blocks = 0
+
     def push(self, x: np.ndarray) -> None:
         if self.enabled:
             if not self._active:
                 # Arm the output sink with jitter cushion on the first incoming audio block
                 self.ring.clear()
-                self.ring.write(np.zeros(self.prefill, dtype=np.float32))
+                self.ring.write(self._silence[:self.prefill])
                 self._avg_fill = float(self.prefill)
                 self._drift_cooldown = 0
                 self.underruns = 0
                 self._active = True
-            self.ring.write(x * np.float32(self.gain))
+            # Avoid allocation when gain is unity (0 dB) — very common case
+            if self._gain_is_unity:
+                self.ring.write(x)
+            else:
+                self.ring.write(x * np.float32(self.gain))
 
     @property
     def latency_s(self) -> float:
@@ -155,38 +190,100 @@ class OutputSink:
         if not self.enabled or not self._active:
             outdata.fill(0)
             return
+
         fill = self.ring.fill
-        self._avg_fill = 0.98 * self._avg_fill + 0.02 * fill
+        self._avg_fill = 0.995 * self._avg_fill + 0.005 * fill
         self._drift_cooldown += 1
 
         want = frames
-        # Clock drift: low-pass filtered drift check with cooldown.
-        # Nudges read length by 1 sample only on sustained drift, avoiding runaway correction.
-        if self._drift_cooldown >= 20:
-            if self._avg_fill > self.prefill + int(1.5 * frames):
+        target_fill = self.prefill + frames
+        # Clock drift: low-pass filtered drift check with 1.5 s cooldown (150 blocks @ 10 ms)
+        # Nudges read length by 1 sample only on sustained real drift (>2.5 blocks deviation).
+        if self._drift_cooldown >= 150:
+            if self._avg_fill > target_fill + int(2.5 * frames):
                 want = frames + 1
                 self._drift_cooldown = 0
-            elif self._avg_fill < self.prefill - int(0.75 * frames) and fill >= frames:
+            elif self._avg_fill < target_fill - int(1.8 * frames) and fill >= frames + 1:
                 want = frames - 1
                 self._drift_cooldown = 0
 
-        data, got = self.ring.read(want)
+        # Ensure pre-allocated read buffer is large enough
+        if self._read_buf.shape[0] < want:
+            self._read_buf = np.zeros(want + 2, dtype=np.float32)
+        else:
+            self._read_buf[:want] = 0.0
+
+        got = self.ring.read_into(self._read_buf[:want])
+
         if got < frames:
             self.underruns += 1
+            now = time.monotonic()
 
-        # Smooth, allocation-free in-place sample adjustment
-        mid = frames // 2
-        if want == frames + 1 and got >= frames:
-            outdata[:mid, 0] = data[:mid]
-            outdata[mid:, 0] = data[mid + 1 : frames + 1]
+            # 1. Pop concealment: crossfade from last known sample to silence
+            if got > 0:
+                flen = min(got, self._fade_samples)
+                fade = np.arange(flen, 0, -1, dtype=np.float32) / flen
+                self._read_buf[got - flen : got] *= fade
+
+            # 2. Adaptive cushion expansion on repeated underruns (auto-adapts for low-end PCs)
+            if now - self._last_underrun_time < 4.0:
+                self._consecutive_underruns += 1
+                if self._consecutive_underruns >= 2 and self.prefill < self.max_prefill:
+                    step = int(0.5 * frames)
+                    self.prefill = min(self.max_prefill, self.prefill + step)
+                    log.debug("Adaptive buffer expanded to %d samples for '%s'", self.prefill, self.spec.name)
+            else:
+                self._consecutive_underruns = 1
+            self._last_underrun_time = now
+            self._stable_blocks = 0
+
+            # 3. Re-arm cushion: DON'T inject silence into the live stream!
+            # Instead, just reset the fill tracker so the next push() naturally rebuilds
+            # the cushion. Injecting silence mid-stream was a major source of clicks.
+            self._avg_fill = float(self.ring.fill)
+            self._drift_cooldown = 0
+            self._needs_fade_in = True
+        else:
+            self._stable_blocks += 1
+            # Gentle relaxation towards base prefill after sustained stability (3000 blocks ~ 30 s)
+            if self._stable_blocks > 3000 and self.prefill > self.base_prefill:
+                self.prefill = max(self.base_prefill, self.prefill - 1)
+                self._stable_blocks = 2000
+
+        # Smooth resume fade-in when recovering from an underrun (prevents leading edge click)
+        if self._needs_fade_in and got >= frames:
+            flen = min(frames, self._fade_samples)
+            fade = np.arange(1, flen + 1, dtype=np.float32) / flen
+            self._read_buf[:flen] *= fade
+            self._needs_fade_in = False
+
+        # Write to output: simple direct copy (no per-sample crossfade for drift correction)
+        # Drift correction uses want != frames, meaning we read 1 extra or 1 fewer sample.
+        # For "drop 1 sample": we read frames+1 samples but only output frames.
+        #   Use linear interpolation to smoothly squeeze frames+1 into frames.
+        # For "insert 1 sample": we read frames-1 samples but need to output frames.
+        #   Use linear interpolation to smoothly stretch frames-1 into frames.
+        if want == frames + 1 and got >= frames + 1:
+            # Squeeze frames+1 samples into frames output samples via linear interpolation
+            src = self._read_buf[:frames + 1]
+            indices = np.linspace(0, frames, frames, endpoint=False, dtype=np.float32)
+            idx_int = indices.astype(np.int32)
+            frac = indices - idx_int
+            outdata[:, 0] = src[idx_int] * (1.0 - frac) + src[np.minimum(idx_int + 1, frames)] * frac
             self.corrections += 1
         elif want == frames - 1 and got >= frames - 1:
-            outdata[:mid, 0] = data[:mid]
-            outdata[mid, 0] = data[max(0, mid - 1)]
-            outdata[mid + 1 :, 0] = data[mid : frames - 1]
+            # Stretch frames-1 samples into frames output samples via linear interpolation
+            src = self._read_buf[:frames - 1]
+            indices = np.linspace(0, frames - 2, frames, endpoint=True, dtype=np.float32)
+            idx_int = np.minimum(indices.astype(np.int32), frames - 2)
+            frac = indices - idx_int
+            outdata[:, 0] = src[idx_int] * (1.0 - frac) + src[np.minimum(idx_int + 1, frames - 2)] * frac
             self.corrections += 1
         else:
-            outdata[:, 0] = data[:frames]
+            outdata[:frames, 0] = self._read_buf[:frames]
+
+        # Track last output sample for continuity
+        self._last_sample = outdata[frames - 1, 0]
 
         if self.channels > 1:
             outdata[:, 1:] = outdata[:, :1]
@@ -303,6 +400,8 @@ class AudioEngine:
     # ------------------------------------------------------------ controls
     def set_chain(self, chain: Chain) -> None:
         self.chain = chain  # atomic swap; old chain is simply dropped
+        for s in self.sinks.values():
+            s.notify_pipeline_change()
 
     def toggle_bypass(self) -> bool:
         return self.set_bypass(not self.bypass)
@@ -378,12 +477,16 @@ class AudioEngine:
                 self._telemetry = self.chain.telemetry()
         except Exception:  # noqa: BLE001 - never kill the audio thread; fall back to pass-through
             self._errors += 1
-            log.exception("DSP failure; passing audio through")
+            log.debug("DSP failure; passing audio through", exc_info=True)
+            # Mute on error instead of switching to raw audio, which causes a
+            # spectral/gain discontinuity heard as a loud click.  Missing 10 ms
+            # of silence is far less objectionable than a pop.
+            silence = np.zeros_like(x)
             for name, s in self.sinks.items():
                 if name == "monitor":
-                    s.push(self.cues.mix_into(x))
+                    s.push(self.cues.mix_into(silence))
                 else:
-                    s.push(x)
+                    s.push(silence)
         load = (time.perf_counter() - t0) / (frames / self.sr)
         self._cpu = 0.9 * self._cpu + 0.1 * load
         self._cpu_peak = max(load, self._cpu_peak * 0.995)
