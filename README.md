@@ -58,15 +58,28 @@ Microphone Input ─┼─▶ High-Pass Filter (Rumble removal, 90 Hz default)  
 
 ---
 
-## Real-Time Audio Proof & Spectrogram Analysis
+## Real-Time Audio Proof & Side-by-Side Comparison
 
-Don't just take our word for it—listen and look at the actual time-frequency transformations computed in real time by the Micforge engine:
+Don't just take our word for it—listen and visually compare how a real budget microphone recording is transformed in real time through the Micforge DSP rack:
 
-![Micforge Audio Pipeline Spectrogram Comparison](docs/images/spectrogram_comparison.png)
+| 🔈 Raw Microphone (Default / Unprocessed) | 🎧 Micforge Enhanced (Live 11-Stage Rack) |
+|:---:|:---:|
+| **[▶️ Click to Listen: Raw Audio (`docs/audio/1_raw.wav`)](docs/audio/1_raw.wav)** | **[▶️ Click to Listen: Processed Audio (`docs/audio/1_processed.wav`)](docs/audio/1_processed.wav)** |
+| [![Raw Spectrogram](docs/images/spectrogram_raw.png)](docs/audio/1_raw.wav) | [![Processed Spectrogram](docs/images/spectrogram_processed.png)](docs/audio/1_processed.wav) |
+| **❌ Loud background noise & hiss**<br>Constant pressure cooker steam & fan drone audible between words ($-35.3\text{ dBFS}$) | **✅ Pure digital black in pauses**<br>Noise floor dropped by **$+38.7\text{ dB}$** ($-74.0\text{ dBFS}$)—zero audible hiss or background hum |
+| **❌ Hollow "empty bathroom" flutter**<br>Untreated hard-wall reflections ring around the speech | **✅ Studio-dry vocal acoustics**<br>Late room reverberation flutter cleanly stripped out |
+| **❌ Thin, tinny, weak headset tone**<br>Sounds like a cheap laptop or budget gaming headset mic | **✅ Warm broadcast radio presence**<br>Rich $120\text{ Hz}$ vocal chest resonance (SM7B/RE20 proximity effect) |
+| **❌ Volume jumps & harsh spikes**<br>Quiet whispers get lost, loud talking clips into distortion | **✅ Consistent, broadcast-leveled volume**<br>Smooth RMS leveling with a hard $-1.5\text{ dBFS}$ peak limiter (zero clipping) |
 
-### 🎧 Audio Samples (Offline & Live Matching)
-- 🔈 **[Raw Input Microphone Audio (`docs/audio/1_raw.wav`)](docs/audio/1_raw.wav)**: 16 kHz raw capture containing voice, room reverberation, air conditioner noise, and continuous high-frequency background hiss.
-- 🎧 **[Full Micforge Pipeline Output (`docs/audio/1_processed.wav`)](docs/audio/1_processed.wav)**: Fully processed in real time through the 11-stage rack (CoFi-Lite AI Denoiser + Dereverberation + Voice Proximity Chest Warmth + Soft Gate + Parametric EQ + De-Esser + Compressor + Limiter).
+<br>
+
+<details>
+<summary><b>🔍 Click to view Full Stacked Waveform & High-Resolution Spectrogram Analysis</b></summary>
+<br>
+
+![Full Stacked Comparison](docs/images/spectrogram_comparison.png)
+
+</details>
 
 ### 📊 Objective Quality & Latency Benchmark
 | Benchmark Metric | Raw Input (`1_raw.wav`) | Micforge Output (`1_processed.wav`) | Delta / Improvement |
