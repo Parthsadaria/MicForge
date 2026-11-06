@@ -87,3 +87,14 @@ external/
 # Explicitly ensure the bundled production ONNX model is tracked
 !src/micforge/models/cofilite.onnx
 
+# Developer notes & release instructions
+dev_notes/
+dev_notes.md
+
+# Packaging secrets & credentials
+.pypirc
+
+# Diagnostic export archives
+*.zip
+
+

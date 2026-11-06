@@ -1,6 +1,6 @@
 # Micforge
 
-[![Version](https://img.shields.io/badge/version-1.3.0-0284c7.svg)](verison%20notes/v1.3.0.md)
+[![PyPI](https://img.shields.io/pypi/v/micforge.svg?color=0284c7)](https://pypi.org/project/micforge/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-emerald.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-128%2F128%20passing-teal.svg)](tests/)
@@ -72,6 +72,13 @@ Let's be engineer-honest:
   - **Linux:** PulseAudio/PipeWire null sink (`pactl load-module module-null-sink sink_name=micforge`)
 
 ### 2. Installation
+
+Install directly via `pip`:
+```bash
+pip install micforge
+```
+
+Or install from source for development:
 ```bash
 git clone https://github.com/Parthsadaria/MicForge.git
 cd MicForge
