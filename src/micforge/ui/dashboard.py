@@ -77,10 +77,12 @@ def _pipeline_ribbon(snap: EngineSnapshot) -> Text:
     t = Text()
     t.append("Rack: ", style="grey50")
 
+    is_neural = tel.get("denoise", {}).get("is_neural", 1.0) > 0.5
+    dn_label = "AI" if is_neural else "WNR"
     stages = [
         ("HPF", True),
         ("AEC", "aec" in tel and tel["aec"].get("enabled", 1.0) > 0.5),
-        ("AI", "denoise" in tel and tel["denoise"].get("enabled", 1.0) > 0.5),
+        (dn_label, "denoise" in tel and tel["denoise"].get("enabled", 1.0) > 0.5),
         ("VERB", "deverb" in tel and tel["deverb"].get("enabled", 1.0) > 0.5),
         ("GATE", "gate" in tel and tel["gate"].get("enabled", 1.0) > 0.5),
         ("BODY", "proximity" in tel and tel["proximity"].get("enabled", 1.0) > 0.5),
@@ -94,12 +96,12 @@ def _pipeline_ribbon(snap: EngineSnapshot) -> Text:
     for i, (name, is_on) in enumerate(stages):
         if not is_on:
             t.append(f"{name}·", style="grey37")
-        elif name == "AI" and tel.get("denoise", {}).get("napping", 0) > 0.5:
+        elif name in ("AI", "WNR") and tel.get("denoise", {}).get("napping", 0) > 0.5:
             t.append(f"{name}💤", style="dim cyan")
         elif name == "GATE" and tel.get("gate", {}).get("open", 0) <= 0.5:
             t.append(f"{name}·", style="grey50")
         else:
-            t.append(f"{name}●", style="bold green" if name == "AI" else "cyan")
+            t.append(f"{name}●", style="bold green" if name == "AI" else "bold yellow" if name == "WNR" else "cyan")
 
         if i < len(stages) - 1:
             t.append(" ", style="grey23")
@@ -229,7 +231,12 @@ def _reductions(snap: EngineSnapshot, width: int) -> Table:
 def _spectrum(snap: EngineSnapshot, ctx: LiveContext, width: int) -> Table:
     panel_w = max(20, (width - 10) // 2)
     rep = max(1, min(2, panel_w // ctx.n_bands))
-    f_lo, f_hi = ctx.centers
+    if isinstance(ctx.centers, (list, tuple)) and len(ctx.centers) == 2:
+        f_lo, f_hi = float(ctx.centers[0]), float(ctx.centers[1])
+    elif isinstance(ctx.centers, (list, tuple)) and len(ctx.centers) > 2:
+        f_lo, f_hi = float(ctx.centers[0]), float(ctx.centers[-1])
+    else:
+        f_lo, f_hi = 60.0, 16000.0
     height = 3
     tbl = Table.grid(padding=(0, 2))
     tbl.add_column()
@@ -282,6 +289,23 @@ def _stats(snap: EngineSnapshot, ctx: LiveContext, now: float) -> Table:
         "audio sync", glitch_text,
         "clock drift", drift_text,
         "profile", Text("Active" if ctx.has_profile else "None", style="green" if ctx.has_profile else "grey50"),
+    )
+
+    timings = snap.telemetry.get("stage_timings", {})
+    tot = timings.get("total", {})
+    tot_p50 = tot.get("p50_us", 0.0)
+    tot_p99 = tot.get("p99_us", 0.0)
+    dn = timings.get("denoise", {})
+    dn_p99 = dn.get("p99_us", 0.0)
+
+    timing_style = "green" if tot_p99 < 3500 else "yellow" if tot_p99 < 5000 else "bold red"
+    timing_text = Text(f"{tot_p50:.0f}µs (p99 {tot_p99:.0f}µs)" if tot_p99 > 0 else "measuring…", style=timing_style)
+    ai_tail_text = Text(f"{dn_p99:.0f}µs" if dn_p99 > 0 else "-", style="dim cyan")
+
+    tbl.add_row(
+        "dsp timing", timing_text,
+        "ai tail", ai_tail_text,
+        "budget", Text("5333 µs", style="dim grey50"),
     )
     return tbl
 
@@ -337,13 +361,17 @@ def render_gamer_hud(snap: EngineSnapshot, ctx: LiveContext, width: int, now: fl
     else:
         header.append(" ● LIVE HUD ", style="bold black on green")
 
-    # Voice Activity Detector Badge
+    # Voice Activity Detector Badge (driven directly by CoFi-Lite neural mask VAD)
     gate = tel.get("gate", {})
+    dn = tel.get("denoise", {})
+    speech_prob = float(dn.get("speech_prob", 0.0))
+    is_speech = dn.get("is_speech", 0.0) > 0.5 or speech_prob > 0.45 or gate.get("open", 0.0) > 0.5
     if snap.muted:
         vad = Text(" [🤐 SILENCED] ", style="bold red")
-    elif gate.get("open", 0.0) > 0.5:
-        vad = Text(" [🎙️ VOICED SPEECH] ", style="bold green")
-    elif tel.get("denoise", {}).get("napping", 0.0) > 0.5:
+    elif is_speech:
+        pct = int(speech_prob * 100)
+        vad = Text(f" [🎙️ VOICED {pct}%] ", style="bold green") if pct > 0 else Text(" [🎙️ VOICED SPEECH] ", style="bold green")
+    elif dn.get("napping", 0.0) > 0.5:
         vad = Text(" [💤 IDLE NAP] ", style="dim cyan")
     else:
         vad = Text(" [👂 LISTENING] ", style="dim grey50")

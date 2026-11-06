@@ -189,11 +189,12 @@ class SystemTrayDaemon:
 
         def _is_cofilite(item):
             dn = self.engine.chain.stage("denoise")
-            return getattr(dn, "name", "") == "denoise" and "cofilite" in getattr(dn, "model_name", "").lower()
+            actual = getattr(dn, "_stage", dn)
+            from ..dsp.cofilite import CoFiLiteDenoiser
+            return isinstance(actual, CoFiLiteDenoiser) or getattr(actual, "model_type", "") == "cofilite"
 
         def _is_spectral(item):
-            dn = self.engine.chain.stage("denoise")
-            return getattr(dn, "name", "") == "denoise" and "cofilite" not in getattr(dn, "model_name", "").lower()
+            return not _is_cofilite(item)
 
         model_items = [
             pystray.MenuItem("CoFi-Lite Neural (High Quality, <70ms)", _set_cofilite, checked=_is_cofilite, radio=True),

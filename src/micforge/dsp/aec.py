@@ -124,6 +124,8 @@ class AECResidualSuppressor:
         smoothed[-1] = 0.3 * gain[-2] + 0.7 * gain[-1]
 
         # Recursive smoothing
+        if self._prior_gain.shape[0] != smoothed.shape[0]:
+            self._prior_gain = np.ones(smoothed.shape[0], dtype=np.float32)
         self._prior_gain = 0.4 * self._prior_gain + 0.6 * smoothed
         return err_spec * self._prior_gain
 
@@ -139,6 +141,7 @@ class AcousticEchoCanceller(Processor):
         delay_ms: float = 40.0,
         suppression_db: float = 24.0,
         enabled: bool = True,
+        block_size: int = 128,
     ) -> None:
         super().__init__(sample_rate, enabled)
         self.amount = float(min(1.0, max(0.0, amount)))
@@ -147,8 +150,8 @@ class AcousticEchoCanceller(Processor):
         self.suppression_db = float(min(40.0, max(6.0, suppression_db)))
 
         # Sub-band PBFDAF block parameters
-        self.N = 128  # Sub-block size (2.67 ms @ 48 kHz)
-        self.K = self.N + 1  # RFFT bins (129)
+        self.N = int(block_size)  # Sub-block size: 128 (standalone) or 256 (shared STFT grid)
+        self.K = self.N + 1  # RFFT bins (129 or 257)
         self.P = max(2, min(16, int(self.filter_length_ms * 1e-3 * sample_rate / self.N)))  # Partitions
 
         # Adaptive filter state
@@ -378,6 +381,79 @@ class AcousticEchoCanceller(Processor):
             return chunk
         else:
             return x  # Pass through if buffer is still priming
+
+    def process_spectrum(self, spec: np.ndarray) -> np.ndarray:
+        """Process a single complex STFT frame in the frequency domain."""
+        if not self.enabled or self.amount <= 1e-4:
+            return spec
+
+        if not self._ref_available or self._ref_energy_db < -70.0:
+            self._erle_db = 0.0
+            self._echo_detected = False
+            return spec
+
+        # Extract aligned reference block of size 2N
+        delay_samples = int(self.delay_ms * 1e-3 * self.sample_rate)
+        aligned_ref_idx = self._mic_processed - delay_samples
+        self._mic_processed += self.N
+
+        if aligned_ref_idx >= 0 and self._ref_w >= aligned_ref_idx + (self.N * 2):
+            cap = self._ref_cap
+            r_idx = aligned_ref_idx % cap
+            first = min(self.N * 2, cap - r_idx)
+            self._scratch_ref_block[:first] = self._ref_ring[r_idx : r_idx + first]
+            if first < self.N * 2:
+                self._scratch_ref_block[first:] = self._ref_ring[: (self.N * 2) - first]
+        else:
+            self._scratch_ref_block.fill(0.0)
+
+        # Shift frequency history
+        self.X_hist[1:] = self.X_hist[:-1]
+        X_curr = np.fft.rfft(self._scratch_ref_block, n=self.N * 2)
+        self.X_hist[0] = X_curr
+
+        # Frequency-domain echo estimate
+        D_hat_spec = np.sum(self.W * self.X_hist, axis=0)
+
+        # Subtract echo in frequency domain
+        err_spec = spec - D_hat_spec
+
+        # Energies for DTD
+        mic_rms = float(np.sqrt(np.mean(spec.real**2 + spec.imag**2)))
+        ref_rms = float(np.sqrt(np.mean(self._scratch_ref_block * self._scratch_ref_block)))
+        err_rms = float(np.sqrt(np.mean(err_spec.real**2 + err_spec.imag**2)))
+
+        dtd_active = self.dtd.check(mic_rms, ref_rms, err_rms)
+        self._dtd_active = dtd_active
+
+        # Reference power tracking
+        self.P_x = 0.95 * self.P_x + 0.05 * (X_curr.real**2 + X_curr.imag**2) / (self.N * 2)
+
+        # NLMS weight update
+        if not dtd_active and ref_rms > 1e-4:
+            step_mu = 0.06 * self.amount
+            norm = (self.P * self.P_x + 1e-2) * (self.N * 2)
+            mu_k = step_mu / norm
+            for p in range(self.P):
+                grad = np.conj(self.X_hist[p]) * err_spec
+                self.W[p] += mu_k * grad
+            self._echo_detected = True
+        else:
+            self._echo_detected = False
+
+        # Residual post-filter suppression
+        echo_psd = D_hat_spec.real**2 + D_hat_spec.imag**2
+        mic_psd = spec.real**2 + spec.imag**2
+        clean_spec = self.post_filter.process(
+            err_spec, echo_psd, mic_psd, dtd_active, self.amount
+        )
+
+        clean_rms = float(np.sqrt(np.mean(clean_spec.real**2 + clean_spec.imag**2)))
+        ratio = max(mic_rms, 1e-6) / max(clean_rms, 1e-6)
+        erle = 10.0 * math.log10(ratio) if ratio > 0 else 0.0
+        self._erle_db = 0.9 * self._erle_db + 0.1 * max(0.0, min(40.0, erle))
+
+        return clean_spec
 
     def telemetry(self) -> dict[str, float]:
         return {

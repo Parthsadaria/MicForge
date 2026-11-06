@@ -91,6 +91,13 @@ class RoomDereverberation(Processor):
     def set_amount(self, amount: float) -> None:
         self.amount = float(min(1.0, max(0.0, amount)))
 
+    def set_hop(self, hop: int) -> None:
+        self.hop = int(hop)
+        self.win = np.hanning(self.n_fft).astype(np.float32) ** 0.5
+        self._scale = float(self.hop / np.sum(self.win**2))
+        self._delay_frames = max(1, min(14, int(round(0.024 * self.sample_rate / self.hop))))
+        self._recompute_decay()
+
     def set_room_decay(self, decay_s: float) -> None:
         self.room_decay = float(min(1.5, max(0.15, decay_s)))
         self._recompute_decay()
@@ -115,6 +122,48 @@ class RoomDereverberation(Processor):
         self._reverb_reduction_db = 0.0
         self._tail_energy_db = -90.0
 
+    def process_spectrum(self, spec: np.ndarray) -> np.ndarray:
+        """Process a single complex STFT frame in-place or returning modified spectrum."""
+        if not self.enabled or self.amount <= 1e-4:
+            return spec
+
+        min_gain = db2lin(-18.0 * self.amount)  # Attenuation floor
+        coupling = 0.22 * (1.0 - 0.4 * self.early_retention)
+
+        psd = spec.real**2 + spec.imag**2
+
+        # Store current PSD into circular history buffer
+        self._hist_psd[self._hist_idx] = psd
+        delayed_idx = (self._hist_idx - self._delay_frames) % self._hist_len
+        delayed_psd = self._hist_psd[delayed_idx]
+        self._hist_idx = (self._hist_idx + 1) % self._hist_len
+
+        # Update late reverberation energy model
+        reverb_input = delayed_psd * coupling
+        self._late_reverb_psd = np.maximum(
+            self._late_reverb_psd * self._decay_vec,
+            reverb_input,
+        )
+
+        # Compute suppression mask
+        reverb_ratio = np.sqrt(self._late_reverb_psd / (psd + EPS))
+        raw_gain = 1.0 - (self.amount * 1.35) * reverb_ratio
+        gain = np.clip(raw_gain, min_gain, 1.0)
+
+        # Frequency smoothing (3-point rolling average)
+        smoothed_gain = np.empty_like(gain)
+        smoothed_gain[0] = 0.7 * gain[0] + 0.3 * gain[1]
+        smoothed_gain[1:-1] = 0.25 * gain[:-2] + 0.5 * gain[1:-1] + 0.25 * gain[2:]
+        smoothed_gain[-1] = 0.3 * gain[-2] + 0.7 * gain[-1]
+
+        # Temporal recursive smoothing
+        alpha_time = 0.3
+        self._prior_gain = (1.0 - alpha_time) * self._prior_gain + alpha_time * smoothed_gain
+
+        self._reverb_reduction_db = float(-20.0 * np.log10(max(float(np.mean(self._prior_gain)), 1e-6)))
+
+        return spec * self._prior_gain
+
     def process(self, x: np.ndarray) -> np.ndarray:
         if not self.enabled or self.amount <= 1e-4 or x.size == 0:
             return x
@@ -130,9 +179,6 @@ class RoomDereverberation(Processor):
         self._in_buf[self._in_len : self._in_len + n_in] = x
         self._in_len += n_in
 
-        min_gain = db2lin(-18.0 * self.amount)  # Attenuation floor (prevents musical artifacts)
-        coupling = 0.22 * (1.0 - 0.4 * self.early_retention)
-
         # 2. Process STFT frames
         while self._in_len >= self.n_fft:
             self._scratch_frame[:] = self._in_buf[: self.n_fft]
@@ -147,40 +193,9 @@ class RoomDereverberation(Processor):
 
             # Windowed forward RFFT
             spec = np.fft.rfft(self._scratch_frame * self.win, n=self.n_fft)
-            psd = spec.real**2 + spec.imag**2
 
-            # Store current PSD into circular history buffer
-            self._hist_psd[self._hist_idx] = psd
-            delayed_idx = (self._hist_idx - self._delay_frames) % self._hist_len
-            delayed_psd = self._hist_psd[delayed_idx]
-            self._hist_idx = (self._hist_idx + 1) % self._hist_len
-
-            # Update late reverberation energy model
-            # Late reverb power decays exponentially or takes a portion of delayed speech
-            reverb_input = delayed_psd * coupling
-            self._late_reverb_psd = np.maximum(
-                self._late_reverb_psd * self._decay_vec,
-                reverb_input
-            )
-
-            # Compute suppression mask
-            # Gain = 1 - beta * (R_late / P_current)^0.5
-            reverb_ratio = np.sqrt(self._late_reverb_psd / (psd + EPS))
-            raw_gain = 1.0 - (self.amount * 1.35) * reverb_ratio
-            gain = np.clip(raw_gain, min_gain, 1.0)
-
-            # Frequency smoothing (3-point rolling average) to eliminate musical noise
-            smoothed_gain = np.empty_like(gain)
-            smoothed_gain[0] = 0.7 * gain[0] + 0.3 * gain[1]
-            smoothed_gain[1:-1] = 0.25 * gain[:-2] + 0.5 * gain[1:-1] + 0.25 * gain[2:]
-            smoothed_gain[-1] = 0.3 * gain[-2] + 0.7 * gain[-1]
-
-            # Temporal recursive smoothing (decision-directed approach)
-            alpha_time = 0.3
-            self._prior_gain = (1.0 - alpha_time) * self._prior_gain + alpha_time * smoothed_gain
-
-            # Apply gain mask
-            mod_spec = spec * self._prior_gain
+            # Process in frequency domain
+            mod_spec = self.process_spectrum(spec)
 
             # Inverse RFFT and overlap-add synthesis
             out_frame = np.fft.irfft(mod_spec, n=self.n_fft).real * self.win * self._scale

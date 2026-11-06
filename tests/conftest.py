@@ -4,11 +4,20 @@ from micforge.audio import backend
 from micforge.config import AppConfig
 import micforge.config as cfgmod
 
-from fake_sd import make_fake_sd
+import sys
+from pathlib import Path
+
+# Ensure repo root is on sys.path
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from tests.fake_sd import make_fake_sd
 
 
 @pytest.fixture()
 def fake_audio(monkeypatch):
+    monkeypatch.setenv("MICFORGE_TEST_FAKE_SD", "1")
     sd = make_fake_sd()
     backend.set_backend(sd)
     yield sd

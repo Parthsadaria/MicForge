@@ -125,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import multiprocessing
+    multiprocessing.freeze_support()
     args = build_parser().parse_args(argv)
     setup_logging(args.debug)
     try:

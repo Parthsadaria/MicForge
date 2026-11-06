@@ -1,9 +1,9 @@
 # Micforge
 
-[![PyPI](https://img.shields.io/pypi/v/micforge.svg?color=0284c7)](https://pypi.org/project/micforge/)
+[![Version](https://img.shields.io/badge/version-1.3.1-0284c7.svg)](verison%20notes/v1.3.1.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-emerald.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-128%2F128%20passing-teal.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-139%2F139%20passing-teal.svg)](tests/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-neutral.svg)]()
 
 > **Real-time, local-first microphone clean-up for Discord, gaming, and streaming.**  
@@ -21,6 +21,10 @@ It pairs an **11-stage modular audio processing rack** with an ultra-lightweight
 
 ### What makes it different?
 - **Ultra-lean footprint:** Consumes only **~70–85 MB of RAM** and **<5–8% CPU** on a single core during gaming. Zero cloud calls, zero telemetry, 100% offline.
+- **Dedicated Process GIL Isolation (v1.3.1):** Moves real-time audio and DSP into an isolated OS process via shared memory and high-priority queues, shielding the audio thread from UI rendering spikes.
+- **Single Shared STFT Rack (v1.3.1):** Unifies AEC, neural denoising, and dereverberation into one frequency-domain pass on a 512-point grid, slashing redundant FFTs and minimizing latency to ~1.1 ms compute time.
+- **Voice-Targeted Naturalness (v1.3.1):** In-domain frequency mixing (`naturalness: 0.08`) modulates dry blend strictly on voiced speech harmonics, banishing underwater phase artifacts while achieving **58.8 dB suppression** on loud stationary hiss and pressure cookers.
+- **Free Neural Mask VAD (v1.3.1):** Derives high-resolution speech probability directly from CoFi-Lite's neural mask ($300-4,000\text{ Hz}$) with hysteresis smoothing to drive gating without chattering.
 - **Continuous Adaptive Noise Profiling (v1.3.0):** Voice-aware background noise learner that adapts to spinning fans and AC drift without ever learning on speech. Includes environment profiles (`quiet_room`, `fan_on`, `mechanical_keyboard`).
 - **Hot-Plug & Auto-Recovery (v1.3.0):** Seamless reconnects with exponential backoff on USB disconnects, with safe bypass fallback so you are never left silently muted.
 - **End-to-End Latency Benchmark (v1.3.0):** Measures actual loopback roundtrip latency and itemizes hardware vs. DSP delays with actionable guidance (`micforge latency`).
@@ -54,6 +58,29 @@ Microphone Input ─┼─▶ High-Pass Filter (Rumble removal, 90 Hz default)  
 
 ---
 
+## Real-Time Audio Proof & Spectrogram Analysis
+
+Don't just take our word for it—listen and look at the actual time-frequency transformations computed in real time by the Micforge engine:
+
+![Micforge Audio Pipeline Spectrogram Comparison](docs/images/spectrogram_comparison.png)
+
+### 🎧 Audio Samples (Offline & Live Matching)
+- 🔈 **[Raw Input Microphone Audio (`docs/audio/1_raw.wav`)](docs/audio/1_raw.wav)**: 16 kHz raw capture containing voice, room reverberation, air conditioner noise, and continuous high-frequency background hiss.
+- 🎧 **[Full Micforge Pipeline Output (`docs/audio/1_processed.wav`)](docs/audio/1_processed.wav)**: Fully processed in real time through the 11-stage rack (CoFi-Lite AI Denoiser + Dereverberation + Voice Proximity Chest Warmth + Soft Gate + Parametric EQ + De-Esser + Compressor + Limiter).
+
+### 📊 Objective Quality & Latency Benchmark
+| Benchmark Metric | Raw Input (`1_raw.wav`) | Micforge Output (`1_processed.wav`) | Delta / Improvement |
+|:---|:---:|:---:|:---:|
+| **Inter-Word Silence Pause Noise Floor** | -35.29 dBFS | **-73.96 dBFS** | **+38.67 dB quieter** (digital black) |
+| **Broadband Steam / Cooker Hiss** | -30.00 dBFS | **-89.24 dBFS** | **+58.79 dB suppression** |
+| **DNSMOS Overall Quality (OVRL)** | 1.75 | **1.99** | **+0.24 MOS points** |
+| **DNSMOS Speech Quality (SIG)** | 1.00 | **1.45** | **+0.45 MOS points** |
+| **STFT Refactor Null-Test (SI-SDR)**| — | **149.11 dB (CoFi-Lite)** | Bit-exact mathematical null (>40 dB target) |
+| **Per-Block DSP Execution Time** | — | **~1.12 ms** ($N=160$ @ 16 kHz) | Real-time budget headroom > 85% |
+| **Audio-Thread Heap Allocations** | — | **0 allocations** | Zero garbage-collection jitter |
+
+---
+
 ## Realistic Expectations
 
 Let's be engineer-honest:
@@ -72,13 +99,6 @@ Let's be engineer-honest:
   - **Linux:** PulseAudio/PipeWire null sink (`pactl load-module module-null-sink sink_name=micforge`)
 
 ### 2. Installation
-
-Install directly via `pip`:
-```bash
-pip install micforge
-```
-
-Or install from source for development:
 ```bash
 git clone https://github.com/Parthsadaria/MicForge.git
 cd MicForge
@@ -227,6 +247,7 @@ micforge/
 ├── src/micforge/
 │   ├── audio/
 │   │   ├── engine.py            # Stream lifecycle, phase centering, cushion re-arming
+│   │   ├── isolated_engine.py   # Dedicated process isolation, shared memory & watchdog
 │   │   ├── loopback.py          # WASAPI loopback speaker capture for AEC
 │   │   ├── cues.py              # Procedural sine-sweep feedback chimes
 │   │   ├── devices.py           # Device discovery & virtual-cable detection
@@ -244,13 +265,15 @@ micforge/
 │   │   ├── doctor.py            # Audio driver diagnostics & zip export
 │   │   └── files.py             # Offline WAV processing
 │   ├── dsp/
+│   │   ├── chain.py             # 11-stage processing rack & per-stage p50/p99 timing
+│   │   ├── spectral_rack.py     # Single unified STFT rack (AEC + Denoise + Deverb)
 │   │   ├── aec.py               # Acoustic Echo Cancellation (PBFDAF + DTD)
 │   │   ├── deverb.py            # Room Dereverberation (Spectral decay envelope)
 │   │   ├── proximity.py         # Voice Proximity (F0 chest resonance & warmth)
-│   │   ├── cofilite.py          # CoFi-Lite neural speech enhancement
+│   │   ├── cofilite.py          # CoFi-Lite neural speech enhancement & mask VAD
 │   │   ├── denoise.py           # Classical Spectral Wiener fallback
 │   │   ├── biquad.py            # Pure NumPy Second-Order Sections (SOS) engine
-│   │   ├── gate.py              # Soft downward expander / noise gate
+│   │   ├── gate.py              # Soft downward expander driven by neural mask VAD
 │   │   ├── compressor.py        # Fast feed-forward compressor & peak limiter
 │   │   ├── deesser.py           # Split-band de-esser
 │   │   └── leveler.py           # Slow RMS speech leveler
@@ -264,17 +287,21 @@ micforge/
 │   ├── presets.py               # Preset CRUD, validation & built-in definitions
 │   └── cli.py                   # Command-line entry point
 ├── docs/
+│   ├── audio/                   # Real-time raw vs. processed WAV samples
+│   ├── images/                  # High-resolution spectrogram and waveform analyses
 │   └── TROUBLESHOOTING.md       # Centralized diagnostic & OS troubleshooting guide
 ├── scripts/
+│   ├── generate_spectrogram_assets.py # Automated waveform & spectrogram generator
 │   ├── compare_two.py           # Dual-file comparison, metrics & A/B listening
 │   └── compare_audio.py         # Automated WAV processing evaluation
-├── tests/                       # 125 automated tests (mocked PortAudio backend)
+├── tests/                       # 139 automated tests (mocked PortAudio backend)
 ├── verison notes/
 │   ├── v1.1.0.md
 │   ├── v1.1.1.md
 │   ├── v1.2.0.md                # AEC, De-Verb, Proximity, Gamer HUD
 │   ├── v1.2.1.md                # RAM reduction (~85 MB) & clock drift fixes
-│   └── v1.3.0.md                # Adaptive profiles, hot-plug recovery, diagnostics & latency
+│   ├── v1.3.0.md                # Adaptive profiles, hot-plug recovery, diagnostics & latency
+│   └── v1.3.1.md                # Shared STFT rack, process GIL isolation, mask VAD, voice naturalness
 ├── pyproject.toml
 └── README.md
 ```

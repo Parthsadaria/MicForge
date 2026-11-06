@@ -623,9 +623,12 @@ class AudioEngine:
             self._collect_calibration(x)
             processed = self.chain.process(x)
             if self.noise_profiler is not None:
+                dn = self.chain.stage("denoise")
+                speech_prob = float(getattr(dn, "speech_prob", 0.0))
+                is_speech = bool(getattr(dn, "is_speech", False))
                 gate = self.chain.stage("gate")
-                is_voiced = bool(getattr(gate, "is_open", False))
-                self.noise_profiler.update(x, is_voiced=is_voiced)
+                is_voiced = is_speech or bool(getattr(gate, "is_open", False))
+                self.noise_profiler.update(x, is_voiced=is_voiced, speech_prob=speech_prob)
             out = x if self.bypass else processed
             if self.muted:
                 out = np.zeros_like(out)

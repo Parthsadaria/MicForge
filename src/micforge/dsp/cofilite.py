@@ -58,6 +58,7 @@ def find_model_file(custom_path: str | Path | None = None) -> Path | None:
 
 class CoFiLiteDenoiser(Processor):
     name = "denoise"
+    model_type = "cofilite"
 
     def __init__(
         self,
@@ -66,15 +67,24 @@ class CoFiLiteDenoiser(Processor):
         max_reduction_db: float = 24.0,
         model_path: str | Path | None = None,
         enabled: bool = True,
+        naturalness: float = 0.08,
     ) -> None:
         super().__init__(sample_rate, enabled)
+        self.model_type = "cofilite"
         self.model_sr = 16000
         self.n_fft = 512
         self.hop = 256
         self.n_bins = self.n_fft // 2 + 1
         self.max_reduction_db = float(max_reduction_db)
         self.strength = float(min(1.0, max(0.0, strength)))
+        self.naturalness = float(min(0.30, max(0.0, naturalness)))
         self.hist_frames = 12  # ~192ms temporal context; balance of accuracy and CPU
+
+        # Free Mask VAD state
+        self.speech_prob = 0.0
+        self.is_speech = False
+        self._smoothed_vad = 0.0
+        self._is_speech = False
 
         # Square-root Hanning analysis and synthesis window
         self.win = np.hanning(self.n_fft).astype(np.float32) ** 0.5
@@ -251,6 +261,92 @@ class CoFiLiteDenoiser(Processor):
     def noise_floor_db(self) -> float:
         return self._noise_floor_est
 
+    def process_spectrum(self, spec: np.ndarray) -> np.ndarray:
+        """Process a single complex STFT frame in the frequency domain."""
+        if not self.enabled or self._session is None:
+            return spec
+
+        # Update temporal context tensor in-place (avoids np.stack allocation)
+        if self._curr_hist < self.hist_frames:
+            self._inp_tensor[0, 0, self._curr_hist, :] = spec.real
+            self._inp_tensor[0, 1, self._curr_hist, :] = spec.imag
+            self._curr_hist += 1
+        else:
+            self._inp_tensor[0, :, :-1, :] = self._inp_tensor[0, :, 1:, :]
+            self._inp_tensor[0, 0, -1, :] = spec.real
+            self._inp_tensor[0, 1, -1, :] = spec.imag
+
+        # Smart Nap State: maintain temporal history but skip expensive ONNX inference!
+        if self._is_napping:
+            self._reduction_db = 0.9 * self._reduction_db + 0.1 * 40.0
+            self.speech_prob = 0.0
+            self.is_speech = False
+            return np.zeros_like(spec)
+
+        inp = self._inp_tensor[:, :, : self._curr_hist, :]
+
+        # ONNX inference for current frame
+        enh = self._session.run(None, {"input": inp})[0]  # (1, F, T, 2)
+        curr_enh = enh[0, :, -1, :]  # (F, 2)
+
+        dry_mag = np.hypot(spec.real, spec.imag) + EPS
+        enh_mag = np.hypot(curr_enh[:, 0], curr_enh[:, 1])
+
+        # Free Mask VAD: speech probability from neural mask in voice band (300 Hz - 4000 Hz)
+        # At 16 kHz (512 FFT), bin 10 (~312 Hz) to bin 128 (4000 Hz)
+        mask = np.clip(enh_mag / dry_mag, 0.0, 1.0)
+        raw_vad = float(np.mean(mask[10:128]))
+
+        # Smooth with fast attack (0.75) and slow release (0.08)
+        if raw_vad > self._smoothed_vad:
+            self._smoothed_vad = 0.25 * self._smoothed_vad + 0.75 * raw_vad
+        else:
+            self._smoothed_vad = 0.92 * self._smoothed_vad + 0.08 * raw_vad
+
+        # Apply hysteresis (0.45 ON / 0.25 OFF) to avoid gate chattering
+        if self._smoothed_vad >= 0.45:
+            self._is_speech = True
+        elif self._smoothed_vad <= 0.25:
+            self._is_speech = False
+
+        self.is_speech = self._is_speech
+        self.speech_prob = float(np.clip(self._smoothed_vad, 0.0, 1.0))
+
+        # Direct phase-aware complex output:
+        # At strength >= 0.95 (and by default in neural mode), emit clean neural speech
+        # without leaking raw microphone background hiss or pressure-cooker noise.
+        # Below 0.95, smoothly blend with raw audio using a quadratic taper.
+        blend = max(0.0, min(1.0, self.strength))
+        if blend >= 0.95:
+            final_real = curr_enh[:, 0]
+            final_imag = curr_enh[:, 1]
+        else:
+            alpha = blend ** 2  # quadratic curve avoids linear ambient noise bleed
+            final_real = (1.0 - alpha) * spec.real + alpha * curr_enh[:, 0]
+            final_imag = (1.0 - alpha) * spec.imag + alpha * curr_enh[:, 1]
+
+        # Dry/wet blend: mix 5-10% raw STFT back in before iSTFT to kill "underwater" artifact.
+        # Voice-targeted: only applies to speech harmonics when speech is actively detected.
+        # Modulating by the neural mask and limiting to <= 4 kHz ensures zero leakage of
+        # pressure cooker hiss, fan noise, or high-frequency white noise.
+        if self.naturalness > 0.0 and self.speech_prob > 0.20:
+            nat = min(0.25, max(0.0, self.naturalness))
+            prob_factor = float(np.clip((self.speech_prob - 0.20) / 0.30, 0.0, 1.0))
+            f_bins = len(mask)
+            freqs = np.linspace(0.0, float(self.sample_rate) / 2.0, f_bins, dtype=np.float32)
+            voice_band = np.clip((4500.0 - freqs) / 1000.0, 0.0, 1.0)
+            voice_weight = nat * prob_factor * np.clip(mask, 0.0, 1.0) * voice_band
+            final_real = (1.0 - voice_weight) * final_real + voice_weight * spec.real
+            final_imag = (1.0 - voice_weight) * final_imag + voice_weight * spec.imag
+
+        # Telemetry tracking
+        dry_p = np.sum(dry_mag**2) + EPS
+        enh_p = np.sum(final_real**2 + final_imag**2) + EPS
+        red = float(np.clip(10.0 * np.log10(dry_p / enh_p), 0.0, 40.0))
+        self._reduction_db = 0.9 * self._reduction_db + 0.1 * red
+
+        return final_real + 1j * final_imag
+
     # ---------------------------------------------------------------- process
     def process(self, x: np.ndarray) -> np.ndarray:
         if not self.enabled or self._session is None or x.size == 0:
@@ -263,13 +359,17 @@ class CoFiLiteDenoiser(Processor):
         x_db = 10.0 * math.log10(max(x_energy, 1e-12)) if x_energy > 0 else -120.0
 
         if self.nap_enabled:
-            if x_db < self.speech_threshold_db:
-                self._silence_blocks += 1
-                if self._silence_blocks >= self._nap_blocks_limit:
-                    self._is_napping = True
+            if self._is_napping:
+                if x_db >= self.speech_threshold_db:
+                    self._is_napping = False
+                    self._silence_blocks = 0
             else:
-                self._silence_blocks = 0
-                self._is_napping = False
+                if not self.is_speech and x_db < self.speech_threshold_db:
+                    self._silence_blocks += 1
+                    if self._silence_blocks >= self._nap_blocks_limit:
+                        self._is_napping = True
+                else:
+                    self._silence_blocks = 0
 
         # 1. Downsample to 16 kHz
         if self.sample_rate == 48000:
@@ -300,7 +400,6 @@ class CoFiLiteDenoiser(Processor):
         self._in_len += n_16k
 
         # 2. Process STFT frames
-        min_gain = db2lin(-self.max_reduction_db)
         while self._in_len >= self.n_fft:
             frame = self._in_buf[: self.n_fft].copy()  # copy so shift doesn't corrupt it
 
@@ -314,19 +413,9 @@ class CoFiLiteDenoiser(Processor):
 
             spec = np.fft.rfft(frame * self.win, n=self.n_fft)
 
-            # Update temporal context tensor in-place (avoids np.stack allocation)
-            if self._curr_hist < self.hist_frames:
-                self._inp_tensor[0, 0, self._curr_hist, :] = spec.real
-                self._inp_tensor[0, 1, self._curr_hist, :] = spec.imag
-                self._curr_hist += 1
-            else:
-                self._inp_tensor[0, :, :-1, :] = self._inp_tensor[0, :, 1:, :]
-                self._inp_tensor[0, 0, -1, :] = spec.real
-                self._inp_tensor[0, 1, -1, :] = spec.imag
-
             # Smart Nap State: maintain temporal history but skip expensive ONNX inference!
             if self._is_napping:
-                self._reduction_db = 0.9 * self._reduction_db + 0.1 * 40.0
+                self.process_spectrum(spec)
                 if self._out_len + self.hop > self._out_buf.shape[0]:
                     new_out = np.zeros(max(self._out_buf.shape[0] * 2, self._out_len + self.hop + 1024), dtype=np.float32)
                     new_out[: self._out_len] = self._out_buf[: self._out_len]
@@ -336,35 +425,7 @@ class CoFiLiteDenoiser(Processor):
                 self._ola.fill(0.0)
                 continue
 
-            inp = self._inp_tensor[:, :, : self._curr_hist, :]
-
-            # ONNX inference for current frame
-            enh = self._session.run(None, {"input": inp})[0]  # (1, F, T, 2)
-            curr_enh = enh[0, :, -1, :]  # (F, 2)
-
-            dry_mag = np.hypot(spec.real, spec.imag) + EPS
-            enh_mag = np.hypot(curr_enh[:, 0], curr_enh[:, 1])
-
-            # Direct phase-aware complex output:
-            # At strength >= 0.95 (and by default in neural mode), emit pure clean neural speech
-            # without leaking raw microphone background hiss or pressure-cooker noise.
-            # Below 0.95, smoothly blend with raw audio using a quadratic taper.
-            blend = max(0.0, min(1.0, self.strength))
-            if blend >= 0.95:
-                final_real = curr_enh[:, 0]
-                final_imag = curr_enh[:, 1]
-            else:
-                alpha = blend ** 2  # quadratic curve avoids linear ambient noise bleed
-                final_real = (1.0 - alpha) * spec.real + alpha * curr_enh[:, 0]
-                final_imag = (1.0 - alpha) * spec.imag + alpha * curr_enh[:, 1]
-
-            # Telemetry tracking
-            dry_p = np.sum(dry_mag**2) + EPS
-            enh_p = np.sum(final_real**2 + final_imag**2) + EPS
-            red = float(np.clip(10.0 * np.log10(dry_p / enh_p), 0.0, 40.0))
-            self._reduction_db = 0.9 * self._reduction_db + 0.1 * red
-
-            c_spec = final_real + 1j * final_imag
+            c_spec = self.process_spectrum(spec)
             out_frame = np.fft.irfft(c_spec, n=self.n_fft).real * self.win * self._scale
 
             self._ola += out_frame
@@ -378,7 +439,7 @@ class CoFiLiteDenoiser(Processor):
             self._out_buf[self._out_len : self._out_len + self.hop] = self._ola[: self.hop]
             self._out_len += self.hop
 
-            # Shift OLA buffer: non-overlapping since hop < n_fft and direction is left
+            # Shift OLA buffer
             self._ola[: self.n_fft - self.hop] = self._ola[self.hop :].copy()
             self._ola[self.n_fft - self.hop :] = 0.0
 
@@ -419,9 +480,13 @@ class CoFiLiteDenoiser(Processor):
             out_target = sig.resample_poly(chunk_16k, self.sample_rate // 100, 160).astype(np.float32)
             return out_target[:n_in]
 
-    def telemetry(self) -> dict[str, float]:
+    def telemetry(self) -> dict[str, Any]:
         return {
             "reduction_db": self._reduction_db,
             "noise_floor_db": self._noise_floor_est,
             "napping": 1.0 if self._is_napping else 0.0,
+            "speech_prob": self.speech_prob,
+            "is_speech": 1.0 if self.is_speech else 0.0,
+            "is_neural": 1.0,
+            "model": "cofilite",
         }

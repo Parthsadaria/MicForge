@@ -21,6 +21,7 @@ _EPS = 1e-12
 
 class SpectralDenoiser(Processor):
     name = "denoise"
+    model_type = "spectral"
 
     def __init__(
         self,
@@ -29,13 +30,26 @@ class SpectralDenoiser(Processor):
         max_reduction_db: float = 18.0,
         bias: float = 2.2,
         enabled: bool = True,
+        naturalness: float = 0.08,
+        n_fft: int | None = None,
+        hop: int | None = None,
     ) -> None:
         super().__init__(sample_rate, enabled)
-        self.n_fft = 1 << max(6, round(math.log2(sample_rate * 0.0107)))
-        self.hop = self.n_fft // 4
+        self.model_type = "spectral"
+        if n_fft is not None:
+            self.n_fft = n_fft
+            self.hop = hop if hop is not None else self.n_fft // 2
+        else:
+            self.n_fft = 1 << max(6, round(math.log2(sample_rate * 0.0107)))
+            self.hop = self.n_fft // 4
         self.n_bins = self.n_fft // 2 + 1
         self.bias = bias
         self.max_reduction_db = max_reduction_db
+        self.naturalness = float(min(0.30, max(0.0, naturalness)))
+        self.speech_prob = 0.0
+        self.is_speech = False
+        self._smoothed_vad = 0.0
+        self._is_speech = False
         self.set_strength(strength)
 
         n = self.n_fft
@@ -137,8 +151,16 @@ class SpectralDenoiser(Processor):
         self._noise = np.maximum(floor, _EPS)
         return self._noise
 
-    def _frame(self, frame: np.ndarray) -> np.ndarray:
-        spec = np.fft.rfft(frame * self.win)
+    def process_spectrum(self, spec: np.ndarray) -> np.ndarray:
+        """Process a single complex STFT frame in the frequency domain."""
+        if not self.enabled:
+            return spec
+
+        if len(spec) != self.n_bins:
+            self.n_bins = len(spec)
+            self.n_fft = (self.n_bins - 1) * 2
+            self.reset()
+
         p = spec.real**2 + spec.imag**2
         noise = self._track_noise(p) * self._over
 
@@ -152,9 +174,44 @@ class SpectralDenoiser(Processor):
         g = np.maximum(g, self._prev_g * self._decay)  # no abrupt gain collapse
         self._prev_g = g
 
-        out = spec * g
+        # Voice-band mask for VAD (300 Hz - 4000 Hz)
+        bin_lo = max(1, int(300.0 * self.n_fft / self.sample_rate))
+        bin_hi = min(self.n_bins - 1, int(4000.0 * self.n_fft / self.sample_rate))
+        raw_vad = float(np.mean(g[bin_lo:bin_hi])) if bin_hi > bin_lo else float(np.mean(g))
+
+        if raw_vad > self._smoothed_vad:
+            self._smoothed_vad = 0.25 * self._smoothed_vad + 0.75 * raw_vad
+        else:
+            self._smoothed_vad = 0.92 * self._smoothed_vad + 0.08 * raw_vad
+
+        if self._smoothed_vad >= 0.45:
+            self._is_speech = True
+        elif self._smoothed_vad <= 0.25:
+            self._is_speech = False
+
+        self.is_speech = self._is_speech
+        self.speech_prob = float(np.clip(self._smoothed_vad, 0.0, 1.0))
+
+        # Dry/wet blend: mix subtle raw STFT back in before iSTFT to kill "underwater" artifact.
+        # Voice-targeted: only applies to speech harmonics when speech is present.
+        if self.naturalness > 0.0 and self.speech_prob > 0.20:
+            nat = min(0.25, max(0.0, self.naturalness))
+            prob_factor = float(np.clip((self.speech_prob - 0.20) / 0.30, 0.0, 1.0))
+            freqs = np.linspace(0.0, float(self.sample_rate) / 2.0, self.n_bins, dtype=np.float32)
+            voice_band = np.clip((4500.0 - freqs) / 1000.0, 0.0, 1.0)
+            voice_weight = nat * prob_factor * np.clip(g, 0.0, 1.0) * voice_band
+            g_eff = (1.0 - voice_weight) * g + voice_weight * 1.0
+            out = spec * g_eff
+        else:
+            out = spec * g
+
         self._prev_clean = out.real**2 + out.imag**2
         self._reduction_db = float(-20.0 * np.log10(max(float(np.mean(g)), 1e-6)))
+        return out
+
+    def _frame(self, frame: np.ndarray) -> np.ndarray:
+        spec = np.fft.rfft(frame * self.win)
+        out = self.process_spectrum(spec)
         return np.fft.irfft(out, self.n_fft) * self.win * self._scale
 
     # ------------------------------------------------------------------ run
@@ -177,5 +234,12 @@ class SpectralDenoiser(Processor):
             emit = np.concatenate((np.zeros(n - emit.shape[0]), emit))
         return emit.astype(np.float32)
 
-    def telemetry(self) -> dict[str, float]:
-        return {"reduction_db": self._reduction_db, "noise_floor_db": self.noise_floor_db()}
+    def telemetry(self) -> dict[str, Any]:
+        return {
+            "reduction_db": self._reduction_db,
+            "noise_floor_db": self.noise_floor_db(),
+            "speech_prob": self.speech_prob,
+            "is_speech": 1.0 if self.is_speech else 0.0,
+            "is_neural": 0.0,
+            "model": "spectral",
+        }

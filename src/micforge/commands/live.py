@@ -54,17 +54,13 @@ def run_live(
         sinks.append(SinkSpec("cable", devs.cable))
     if devs.monitor:
         sinks.append(SinkSpec("monitor", devs.monitor, enabled=True))
-    engine = AudioEngine(
-        chain=chain,
+    from ..audio.isolated_engine import IsolatedAudioEngine
+    engine = IsolatedAudioEngine(
+        app=app,
+        preset=preset,
         input_device=devs.mic,
         sinks=sinks,
-        input_channel=app.input_channel,
-        sample_rate=app.sample_rate,
-        block_size=app.block_size,
-        jitter_blocks=app.jitter_blocks,
-        play_cues=app.hotkeys.play_cues,
-        cue_volume=app.hotkeys.cue_volume,
-        aec_reference_device=app.aec_reference_device,
+        model_override=model_override,
     )
     names = [p.name for p in list_presets()]
     ctx = LiveContext(
@@ -106,8 +102,7 @@ def run_live(
 
     def _on_switch_preset(p_name: str):
         ctx.preset = p_name
-        new_chain, ctx.has_profile = make_chain(app, p_name, model_override=model_override)
-        engine.set_chain(new_chain)
+        engine.set_preset(p_name)
         flash(f"Preset: {p_name}")
 
     def _on_switch_model(m_type: str):
@@ -122,7 +117,9 @@ def run_live(
                 getattr(dn, "max_reduction_db", 24.0),
                 enabled=getattr(dn, "enabled", True),
             )
-            engine.chain.stages = [new_dn if s.name == "denoise" else s for s in engine.chain.stages]
+            engine.chain.replace_stage("denoise", new_dn)
+            if hasattr(engine, "switch_model"):
+                engine.switch_model("spectral", getattr(dn, "strength", 1.0))
             for s in engine.sinks.values():
                 s.notify_pipeline_change()
             flash("Swapped denoiser: Spectral Wiener (classical)")
@@ -133,8 +130,11 @@ def run_live(
                     getattr(dn, "strength", 1.0),
                     getattr(dn, "max_reduction_db", 24.0),
                     model_path=model_override,
+                    enabled=getattr(dn, "enabled", True),
                 )
-                engine.chain.stages = [new_dn if s.name == "denoise" else s for s in engine.chain.stages]
+                engine.chain.replace_stage("denoise", new_dn)
+                if hasattr(engine, "switch_model"):
+                    engine.switch_model("cofilite", getattr(dn, "strength", 1.0))
                 for s in engine.sinks.values():
                     s.notify_pipeline_change()
                 flash(f"Swapped denoiser: CoFi-Lite ({new_dn.model_name})")
@@ -284,8 +284,10 @@ def run_live(
                     _on_switch_preset(names[(i + 1) % len(names)])
                 elif k == "m":
                     dn = engine.chain.stage("denoise")
+                    actual_dn = getattr(dn, "_stage", dn)
                     from ..dsp.cofilite import CoFiLiteDenoiser
-                    _on_switch_model("spectral" if isinstance(dn, CoFiLiteDenoiser) else "cofilite")
+                    is_cofi = isinstance(actual_dn, CoFiLiteDenoiser) or getattr(actual_dn, "model_type", "") == "cofilite"
+                    _on_switch_model("spectral" if is_cofi else "cofilite")
                 elif k == "c":
                     engine.begin_calibration(3.0)
                 elif k in ("+", "="):

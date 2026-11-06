@@ -28,6 +28,7 @@ class NoiseGate(Processor):
         self.hold_ms = hold_ms
         self.release_ms = release_ms
         self.hysteresis_db = hysteresis_db
+        self.speech_prob: float | None = None
         self._size = max(8, int(sample_rate * 0.002))
         self.reset()
 
@@ -53,14 +54,22 @@ class NoiseGate(Processor):
         out = np.empty(levels.shape[0])
         g, is_open, hold = self._gain, self._open, self._hold_left
         for i, lv in enumerate(levels):
+            # When neural mask VAD is active, drive gate strictly from speech probability
+            # to prevent loud stationary noise (pressure cookers, fans, AC) from forcing the gate open.
+            if self.speech_prob is not None:
+                is_speech_frame = self.speech_prob >= 0.45
+                is_hold_frame = self.speech_prob >= 0.25
+            else:
+                is_speech_frame = lv >= self.threshold_db
+                is_hold_frame = lv >= close_thr
             if is_open:
-                if lv >= close_thr:
+                if is_hold_frame:
                     hold = hold_blocks
                 elif hold > 0:
                     hold -= 1
                 else:
                     is_open = False
-            elif lv >= self.threshold_db:
+            elif is_speech_frame:
                 is_open, hold = True, hold_blocks
             target = 1.0 if is_open else floor
             coef = a_att if target > g else a_rel

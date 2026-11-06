@@ -92,6 +92,7 @@ class DenoiseConfig:
     max_reduction_db: float = 24.0  # attenuation floor per bin
     model_type: str = "cofilite"  # "cofilite" | "spectral"
     model_path: str | None = None  # path to swappable model file (.onnx or .tar)
+    naturalness: float = 0.08  # 0..0.30, dry/wet STFT blend (5-10% raw acoustic mic) eliminating underwater artifacts
 
 
 @dataclass

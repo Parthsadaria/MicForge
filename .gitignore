@@ -84,8 +84,9 @@ external/
 *.pt
 *.ckpt
 
-# Explicitly ensure the bundled production ONNX model is tracked
+# Explicitly ensure the bundled production ONNX model and doc audio samples are tracked
 !src/micforge/models/cofilite.onnx
+!docs/audio/*.wav
 
 # Developer notes & release instructions
 dev_notes/
