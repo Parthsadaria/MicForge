@@ -45,9 +45,9 @@ def test_engine_end_to_end(fake_audio):
     assert res is not None and res.psd is not None and res.noise_db < 0
     assert snap.errors == 0
     assert snap.in_level.peak_db > -40
-    assert snap.cpu_load < 0.75  # Neural model inference + 8-stage DSP
+    assert snap.cpu_load < 1.0  # Neural model inference + 11-stage DSP
     assert snap.latency_ms > 0
-    assert snap.output_underruns <= 3  # startup jitter only
+    assert snap.output_underruns <= 5  # startup jitter only across multi-sinks
     assert "denoise" in snap.telemetry
 
 

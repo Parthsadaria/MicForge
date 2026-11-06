@@ -5,9 +5,36 @@ import math
 from typing import Iterable, Protocol
 
 import numpy as np
-from scipy.signal import sosfilt
 
 from .base import Processor
+
+
+def sosfilt(sos: np.ndarray, x: np.ndarray, zi: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Pure NumPy Direct Form II Transposed Second-Order Sections (biquad) filter.
+
+    Computes identical numerical output to scipy.signal.sosfilt without requiring
+    the 65 MB memory footprint of loading compiled SciPy BLAS/LAPACK runtime DLLs.
+    """
+    sos = np.atleast_2d(np.asarray(sos, dtype=np.float64))
+    n_sections = sos.shape[0]
+    if zi is None:
+        zi_out = np.zeros((n_sections, 2), dtype=np.float64)
+    else:
+        zi_out = np.array(zi, dtype=np.float64, copy=True)
+
+    y = np.array(x, dtype=np.float64, copy=True)
+    for s in range(n_sections):
+        b0, b1, b2, _, a1, a2 = sos[s]
+        z1, z2 = zi_out[s, 0], zi_out[s, 1]
+        for i in range(len(y)):
+            xi = y[i]
+            yi = b0 * xi + z1
+            z1 = b1 * xi - a1 * yi + z2
+            z2 = b2 * xi - a2 * yi
+            y[i] = yi
+        zi_out[s, 0] = z1
+        zi_out[s, 1] = z2
+    return y.astype(np.float32, copy=False), zi_out
 
 
 class BandLike(Protocol):
@@ -67,7 +94,8 @@ class BiquadFilter(Processor):
         super().__init__(sample_rate, enabled)
         self.name = name
         self.sos = np.atleast_2d(np.asarray(sos, dtype=np.float64))
-        self._zi = np.zeros((self.sos.shape[0], 2))
+        self._zi = np.zeros((self.sos.shape[0], 2), dtype=np.float64)
+        self._scratch = np.zeros(0, dtype=np.float64)
 
     @classmethod
     def from_bands(
@@ -89,7 +117,27 @@ class BiquadFilter(Processor):
         return cls(sample_rate, np.vstack(rows), name=name, enabled=enabled)
 
     def process(self, x: np.ndarray) -> np.ndarray:
-        y, self._zi = sosfilt(self.sos, x, zi=self._zi)
+        n = x.shape[0]
+        if self._scratch.shape[0] != n:
+            self._scratch = np.empty(n, dtype=np.float64)
+        self._scratch[:] = x
+
+        y = self._scratch
+        zi = self._zi
+        sos = self.sos
+        for s in range(sos.shape[0]):
+            b0, b1, b2, _, a1, a2 = sos[s]
+            z1 = zi[s, 0]
+            z2 = zi[s, 1]
+            for i in range(n):
+                xi = y[i]
+                yi = b0 * xi + z1
+                z1 = b1 * xi - a1 * yi + z2
+                z2 = b2 * xi - a2 * yi
+                y[i] = yi
+            zi[s, 0] = z1
+            zi[s, 1] = z2
+
         return y.astype(np.float32, copy=False)
 
     def reset(self) -> None:

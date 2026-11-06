@@ -60,6 +60,32 @@ class EQBand:
 
 
 @dataclass
+class AECConfig:
+    enabled: bool = False  # Enabled when loopback reference is provided or active in preset
+    amount: float = 1.0  # 0..1 cancellation intensity
+    filter_length_ms: float = 60.0  # acoustic tail memory (20..200 ms)
+    delay_ms: float = 40.0  # speaker-to-mic loopback alignment (0..250 ms)
+    suppression_db: float = 24.0  # residual echo suppression floor (6..40 dB)
+
+
+@dataclass
+class DeverbConfig:
+    enabled: bool = True
+    amount: float = 0.5  # 0..1 late reverberation reduction aggression
+    room_decay: float = 0.4  # estimated RT60 decay time in seconds (0.15..1.5s)
+    early_retention: float = 0.8  # 0..1 preserves natural direct voice warmth
+
+
+@dataclass
+class ProximityConfig:
+    enabled: bool = True
+    amount: float = 0.5  # 0..1 chest resonance boost intensity
+    body_hz: float = 120.0  # center frequency of voice fundamental (70..250 Hz)
+    warmth: float = 0.35  # 0..1 even-order low harmonic saturation
+    mud_cleanup: float = 0.4  # 0..1 dynamic 300 Hz anti-boxiness cleanup
+
+
+@dataclass
 class DenoiseConfig:
     enabled: bool = True
     strength: float = 1.0  # 0..1, how aggressively noise is attenuated (1.0 = full neural suppression)
@@ -119,8 +145,11 @@ class ChainConfig:
     input_gain_db: float = 0.0
     output_gain_db: float = 0.0
     highpass_hz: float = 90.0  # 0 disables
+    aec: AECConfig = field(default_factory=AECConfig)
     denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
+    deverb: DeverbConfig = field(default_factory=DeverbConfig)
     gate: GateConfig = field(default_factory=GateConfig)
+    proximity: ProximityConfig = field(default_factory=ProximityConfig)
     eq_enabled: bool = True
     eq: list[EQBand] = field(default_factory=list)
     deesser: DeEsserConfig = field(default_factory=DeEsserConfig)
@@ -145,6 +174,9 @@ class ChainConfig:
         check(-40 <= self.input_gain_db <= 40, "input_gain_db must be within -40..40")
         check(-40 <= self.output_gain_db <= 40, "output_gain_db must be within -40..40")
         check(0 <= self.highpass_hz <= 400, "highpass_hz must be within 0..400")
+        check(0.0 <= self.aec.amount <= 1.0, "aec.amount must be within 0..1")
+        check(0.0 <= self.deverb.amount <= 1.0, "deverb.amount must be within 0..1")
+        check(0.0 <= self.proximity.amount <= 1.0, "proximity.amount must be within 0..1")
         check(0.0 <= self.denoise.strength <= 1.0, "denoise.strength must be within 0..1")
         check(0 <= self.denoise.max_reduction_db <= 60, "denoise.max_reduction_db must be within 0..60")
         check(self.denoise.model_type in ("cofilite", "spectral"), "denoise.model_type must be 'cofilite' or 'spectral'")
@@ -179,14 +211,31 @@ class HotkeyConfig:
 class AppConfig:
     sample_rate: int = 48000
     block_size: int = 480  # 10 ms @ 48 kHz
-    jitter_blocks: float = 2.5  # output prefill in blocks; 2.5 = 25 ms balanced cushion (glitch-resistant)
+    jitter_blocks: float = 3.0  # output prefill in blocks; 3.0 = 30 ms rock-solid cushion (glitch-proof for gaming)
     input_device: DeviceSpec = None  # name substring or index; None = system default
     output_device: DeviceSpec = None  # virtual cable (Discord reads its other end)
     monitor_device: DeviceSpec = None  # your headphones, for self-monitoring
+    aec_reference_device: DeviceSpec = None  # speaker/loopback capture device for AEC (None = auto-detect loopback)
     input_channel: int = 0
     preset: str = "discord"
     denoise_model: str | None = None  # custom swappable model path (.onnx or .tar)
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
+
+    @property
+    def mic(self) -> DeviceSpec:
+        return self.input_device
+
+    @mic.setter
+    def mic(self, val: DeviceSpec) -> None:
+        self.input_device = val
+
+    @property
+    def cable(self) -> DeviceSpec:
+        return self.output_device
+
+    @cable.setter
+    def cable(self, val: DeviceSpec) -> None:
+        self.output_device = val
 
     @staticmethod
     def path() -> Path:
@@ -205,10 +254,10 @@ class AppConfig:
                 f"Could not read {p}: {exc}",
                 hint=f"Delete {p} to reset to defaults.",
             ) from exc
-        # Ensure balanced, glitch-resistant default of 2.5 blocks (25ms cushion)
-        jb = getattr(cfg, "jitter_blocks", 2.5)
-        if jb < 1.0 or jb > 8.0 or jb == 1.5:
-            cfg.jitter_blocks = 2.5
+        # Ensure balanced, glitch-resistant default of 3.0 blocks (30ms cushion)
+        jb = getattr(cfg, "jitter_blocks", 3.0)
+        if jb < 1.0 or jb > 8.0 or jb in (1.5, 2.5):
+            cfg.jitter_blocks = 3.0
         cfg.validate()
         return cfg
 

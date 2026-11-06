@@ -331,8 +331,14 @@ def run_comparison(
     if not in_path.is_file():
         raise FileNotFoundError(f"Input audio file not found: {in_path}")
 
-    out_dirs = [Path(output_dir).resolve()]
+    stem = in_path.stem
+
+    # If output_dir was left at default "1&processed" but input is different (e.g. 2.wav), use stem
     out_dir_str = str(output_dir)
+    if "1&processed" in out_dir_str and stem != "1":
+        out_dir_str = out_dir_str.replace("1&processed", f"{stem}&processed")
+
+    out_dirs = [Path(out_dir_str).resolve()]
     if "test_audio" in out_dir_str and "test_audios" not in out_dir_str:
         out_dirs.append(Path(out_dir_str.replace("test_audio", "test_audios")).resolve())
     elif "test_audios" in out_dir_str:
@@ -395,10 +401,10 @@ def run_comparison(
     print("[4/4] Writing audio files, spectrogram images, and interactive player...")
 
     primary = out_dirs[0]
-    noisy_wav = primary / "1_noisy.wav"
-    enh_wav = primary / "1_processed.wav"
-    noisy_spec_png = primary / "1_noisy_spec.png"
-    enh_spec_png = primary / "1_processed_spec.png"
+    noisy_wav = primary / f"{stem}_noisy.wav"
+    enh_wav = primary / f"{stem}_processed.wav"
+    noisy_spec_png = primary / f"{stem}_noisy_spec.png"
+    enh_spec_png = primary / f"{stem}_processed_spec.png"
     side_by_side_png = primary / "comparison_side_by_side.png"
     html_file = primary / "index.html"
 
@@ -417,7 +423,7 @@ def run_comparison(
         common_vmin, common_vmax,
         duration_s,
         side_by_side_png,
-        noisy_title="Noisy speech sample 1",
+        noisy_title=f"Noisy speech sample {stem}",
         enh_title="Enhanced speech by MicForge (CoFi-Lite + DSP)",
     )
 

@@ -37,14 +37,6 @@ def run_live(
     tray: bool = False,
     no_tray: bool = False,
 ) -> None:
-    # Tune GC thresholds to prevent garbage collection pauses during real-time streaming
-    import gc
-    try:
-        gc.freeze()
-        gc.set_threshold(60000, 60, 60)
-    except Exception:
-        pass
-
     preset = preset or app.preset
     model_override = model or app.denoise_model
     devs = resolve_devices(
@@ -72,6 +64,7 @@ def run_live(
         jitter_blocks=app.jitter_blocks,
         play_cues=app.hotkeys.play_cues,
         cue_volume=app.hotkeys.cue_volume,
+        aec_reference_device=app.aec_reference_device,
     )
     names = [p.name for p in list_presets()]
     ctx = LiveContext(
@@ -148,6 +141,15 @@ def run_live(
             except Exception as e:
                 flash(f"CoFi-Lite load error: {e}", 3.0)
 
+    def _on_settings_applied(updated_app: AppConfig) -> None:
+        engine.cues.set_enabled(updated_app.hotkeys.play_cues)
+        engine.cues.set_volume(updated_app.hotkeys.cue_volume)
+        if updated_app.preset != ctx.preset:
+            _on_switch_preset(updated_app.preset)
+        else:
+            _on_switch_preset(ctx.preset)
+        flash("Applied settings from GUI")
+
     # Initialize global hotkeys
     hotkeys = GlobalHotkeyManager(
         app.hotkeys,
@@ -196,6 +198,15 @@ def run_live(
     refresh_interval = 0.10 if is_cmd else 0.07
     last_render = 0.0
 
+    # Collect startup/parsing garbage, freeze runtime objects, and tune GC thresholds
+    import gc
+    try:
+        gc.collect()
+        gc.freeze()
+        gc.set_threshold(100000, 100, 100)
+    except Exception:
+        pass
+
     try:
         with engine, KeyReader() as keys, Live(console=console, screen=True, auto_refresh=False) as live:
             while not exit_event.is_set():
@@ -218,7 +229,48 @@ def run_live(
                 k = k.lower() if k.isalpha() else k
                 if k in ("q", "\x03"):
                     break
-                if k == "b":
+                if k in ("\t", "tab"):
+                    ctx.hud_mode = not ctx.hud_mode
+                    flash("Mode: Gamer HUD" if ctx.hud_mode else "Mode: Studio Inspector")
+                elif k in ("1", "2", "3", "4", "5", "6"):
+                    idx = int(k) - 1
+                    if 0 <= idx < len(names):
+                        _on_switch_preset(names[idx])
+                elif k == "e":
+                    aec = engine.chain.stage("aec")
+                    if aec is not None:
+                        aec.enabled = not getattr(aec, "enabled", True)
+                        flash(f"AEC Echo Cancellation: {'ON' if aec.enabled else 'OFF'}")
+                elif k == "w":
+                    prox = engine.chain.stage("proximity")
+                    if prox is not None:
+                        cur = getattr(prox, "amount", 0.5)
+                        next_amt = 0.35 if cur < 0.2 else 0.55 if cur < 0.45 else 0.75 if cur < 0.65 else 0.0
+                        prox.amount = next_amt
+                        prox.enabled = (next_amt > 0.0)
+                        flash(f"Voice Proximity Body: {int(next_amt * 100)}%" if next_amt > 0 else "Voice Proximity: OFF")
+                elif k == "v":
+                    dv = engine.chain.stage("deverb")
+                    if dv is not None:
+                        cur = getattr(dv, "amount", 0.5)
+                        next_amt = 0.30 if cur < 0.2 else 0.50 if cur < 0.40 else 0.70 if cur < 0.60 else 0.0
+                        dv.amount = next_amt
+                        dv.enabled = (next_amt > 0.0)
+                        flash(f"Room De-Verb: {int(next_amt * 100)}%" if next_amt > 0 else "Room De-Verb: OFF")
+                elif k == "g":
+                    gate = engine.chain.stage("gate")
+                    if gate is not None:
+                        cur = getattr(gate, "threshold_db", -48.0)
+                        next_th = -48.0 if cur <= -50.0 else -44.0 if cur <= -46.0 else -40.0 if cur <= -42.0 else -36.0 if cur <= -38.0 else -52.0
+                        gate.threshold_db = next_th
+                        flash(f"Noise Gate Threshold: {next_th:.0f} dBFS")
+                elif k == "s":
+                    from ..ui.settings_gui import open_settings_window
+                    open_settings_window(app, _on_settings_applied)
+                    flash("Opened MicForge Control Center GUI")
+                elif k in ("h", "?"):
+                    ctx.show_help = not ctx.show_help
+                elif k == "b":
                     _on_toggle_bypass()
                 elif k == "x" and not loopback:
                     _on_toggle_mute()

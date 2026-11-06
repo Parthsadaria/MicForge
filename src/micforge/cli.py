@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     r = sub.add_parser("run", help="live: mic -> processing -> virtual cable (what Discord hears)")
-    r.add_argument("-p", "--preset")
+    r.add_argument("-p", "--preset", help="DSP preset to load (e.g. streaming, gaming, podcast, noisy_room)")
     r.add_argument("--mic", type=_device_arg, help="input device (index or name part)")
     r.add_argument("--cable", type=_device_arg, help="virtual cable output (index or name part)")
     r.add_argument("--monitor", nargs="?", const="", type=_device_arg, metavar="DEVICE",
@@ -39,21 +39,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-tray", action="store_true", help="disable system tray icon")
 
     l = sub.add_parser("loopback", help="hear yourself live through headphones, A/B raw vs processed")
-    l.add_argument("-p", "--preset")
-    l.add_argument("--mic", type=_device_arg)
-    l.add_argument("--out", type=_device_arg, help="headphones device")
+    l.add_argument("-p", "--preset", help="DSP preset to load (default: active preset)")
+    l.add_argument("--mic", type=_device_arg, help="input microphone (index or substring)")
+    l.add_argument("--out", type=_device_arg, help="headphones device (index or substring)")
     l.add_argument("--model", help="swappable CoFi-Lite model file (.onnx or .tar)")
 
     t = sub.add_parser("test", help="record a clip, show before/after analysis, play both back")
-    t.add_argument("-p", "--preset")
-    t.add_argument("-s", "--seconds", type=float, default=8.0)
-    t.add_argument("--mic", type=_device_arg)
-    t.add_argument("--out", type=_device_arg)
+    t.add_argument("-p", "--preset", help="DSP preset to test (default: active preset)")
+    t.add_argument("-s", "--seconds", type=float, default=8.0, help="duration in seconds to record sample")
+    t.add_argument("--mic", type=_device_arg, help="microphone device (index or substring)")
+    t.add_argument("--out", type=_device_arg, help="playback headphones device (index or substring)")
     t.add_argument("--model", help="swappable CoFi-Lite model file (.onnx or .tar)")
 
     c = sub.add_parser("calibrate", help="learn your room noise (improves denoise + sets the gate)")
-    c.add_argument("-s", "--seconds", type=float, default=4.0)
-    c.add_argument("--mic", type=_device_arg)
+    c.add_argument("-s", "--seconds", type=float, default=4.0, help="duration in seconds of ambient silence to sample")
+    c.add_argument("--mic", type=_device_arg, help="microphone device (index or substring)")
     c.add_argument("--reset", action="store_true", help="delete the saved noise profile")
 
     d = sub.add_parser("devices", help="list audio devices")
@@ -61,7 +61,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("setup", help="choose mic / cable / headphones interactively")
 
-    pr = sub.add_parser("presets", help="list presets, or print one as JSON")
+    # Preset management suite
+    p_cmd = sub.add_parser("preset", help="manage and create custom presets")
+    p_sub = p_cmd.add_subparsers(dest="preset_action")
+    p_sub.add_parser("list", help="list all presets")
+    p_save = p_sub.add_parser("save", help="create or save a custom preset")
+    p_save.add_argument("name", help="new preset name")
+    p_save.add_argument("--from", dest="from_preset", help="base preset to clone from")
+    p_save.add_argument("--desc", default="", help="human description for the preset")
+    p_save.add_argument("--force", action="store_true", help="overwrite if exists")
+    p_copy = p_sub.add_parser("copy", help="duplicate an existing preset")
+    p_copy.add_argument("source", help="source preset")
+    p_copy.add_argument("target", help="target new preset name")
+    p_copy.add_argument("--force", action="store_true", help="overwrite if exists")
+    p_del = p_sub.add_parser("delete", help="delete a custom preset")
+    p_del.add_argument("name", help="preset name to delete")
+    p_del.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+    p_exp = p_sub.add_parser("export", help="export preset to portable JSON")
+    p_exp.add_argument("name", help="preset to export")
+    p_exp.add_argument("target", nargs="?", help="output file path")
+    p_imp = p_sub.add_parser("import", help="import preset from JSON file")
+    p_imp.add_argument("source", help="path to preset JSON file")
+    p_imp.add_argument("--name", default=None, help="custom name for imported preset")
+    p_imp.add_argument("--force", action="store_true", help="overwrite if exists")
+    p_show = p_sub.add_parser("show", help="show preset details")
+    p_show.add_argument("name", help="preset name")
+
+    pr = sub.add_parser("presets", help="list presets, or print one as JSON (alias for `micforge preset`)")
     pr.add_argument("name", nargs="?")
 
     f = sub.add_parser("process", help="process a WAV file offline")
@@ -78,10 +104,23 @@ def build_parser() -> argparse.ArgumentParser:
     m_cmd.add_argument("checkpoint", nargs="?", help="source .tar / .pth checkpoint")
     m_cmd.add_argument("output", nargs="?", help="output .onnx file")
 
-    sub.add_parser("doctor", help="check your setup and performance")
+    doc = sub.add_parser("doctor", help="check your setup and performance (plain-English diagnostics)")
+    doc.add_argument("--export", nargs="?", const="", help="export diagnostic report as a redacted .zip bundle")
+
+    lat = sub.add_parser("latency", help="measure end-to-end audio pipeline latency with loopback probe")
+    lat.add_argument("--mic", type=_device_arg, help="input microphone device (index or substring)")
+    lat.add_argument("--out", type=_device_arg, help="output playback device (index or substring)")
+
+    prof = sub.add_parser("profile", help="manage noise profiles (quiet_room, fan_on, mechanical_keyboard)")
+    prof.add_argument("action", choices=["list", "show", "relearn", "switch"], default="list", nargs="?",
+                      help="profile action to perform (list, show, relearn, switch)")
+    prof.add_argument("name", nargs="?", help="profile / environment name")
+
     sub.add_parser("version", help="show micforge version and system information")
     sub.add_parser("settings", help="open GUI to customize global hotkeys, audio cues, and startup")
     sub.add_parser("hotkeys", help="alias for settings")
+    help_p = sub.add_parser("help", help="show comprehensive command guide and dynamic usage examples")
+    help_p.add_argument("command", nargs="?", help="specific command to inspect (e.g. run, latency, profile, doctor)")
     return p
 
 
@@ -133,9 +172,36 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "setup":
             from .commands.devices_cmd import run_setup, show_devices
             run_setup(app)
-        elif cmd == "presets":
-            from .commands.devices_cmd import show_presets
-            show_presets(args.name)
+        elif cmd in ("preset", "presets"):
+            from .commands.preset_cmd import (
+                run_preset_copy,
+                run_preset_delete,
+                run_preset_export,
+                run_preset_import,
+                run_preset_list,
+                run_preset_save,
+                run_preset_show,
+            )
+            action = getattr(args, "preset_action", None)
+            if cmd == "presets":
+                if args.name:
+                    run_preset_show(args.name)
+                else:
+                    run_preset_list(app)
+            elif action in (None, "list"):
+                run_preset_list(app)
+            elif action == "save":
+                run_preset_save(app, args.name, from_preset=args.from_preset, description=args.desc, force=args.force)
+            elif action == "copy":
+                run_preset_copy(args.source, args.target, force=args.force)
+            elif action == "delete":
+                run_preset_delete(args.name, force=args.yes)
+            elif action == "export":
+                run_preset_export(args.name, args.target)
+            elif action == "import":
+                run_preset_import(args.source, name=args.name, force=args.force)
+            elif action == "show":
+                run_preset_show(args.name)
         elif cmd == "process":
             from .commands.files import run_process
             run_process(app, args.input, args.output, args.preset)
@@ -164,11 +230,54 @@ def main(argv: list[str] | None = None) -> int:
                 console.print(f"[bold green]✔ Successfully exported CoFi-Lite model to:[/] {target}")
         elif cmd == "doctor":
             from .commands.doctor import run_doctor
-            return run_doctor(app)
+            export_flag = args.export is not None
+            export_path = args.export if (args.export and len(args.export) > 0) else None
+            return run_doctor(app, export=export_flag, export_path=export_path)
+        elif cmd == "latency":
+            from .commands.latency_test import run_latency_test
+            return run_latency_test(app, mic=args.mic, out=args.out)
+        elif cmd == "profile":
+            action = args.action or "list"
+            if action == "list":
+                from .audio.noise_profile import BUILTIN_ENVIRONMENTS, list_noise_profiles
+                profiles = list_noise_profiles()
+                console.print("\n[bold cyan]🎙️ Available Noise Profiles & Environments:[/]")
+                for p in profiles:
+                    tag = " [green](builtin)[/]" if p in BUILTIN_ENVIRONMENTS else " [dim](custom)[/]"
+                    console.print(f"  • [bold white]{p}[/]{tag}")
+                console.print("\n[dim]Usage: micforge profile switch <name>  │  micforge profile show <name>[/]\n")
+                return 0
+            elif action == "show":
+                from .audio.noise_profile import BUILTIN_ENVIRONMENTS, AdaptiveNoiseProfiler
+                prof_name = args.name or "quiet_room"
+                profiler = AdaptiveNoiseProfiler(sample_rate=app.sample_rate, environment=prof_name)
+                p = profiler.current_profile
+                console.print(f"\n[bold cyan]Noise Profile:[/] [bold green]{p.name}[/]")
+                console.print(f"  • Estimated Floor:    [yellow]{p.noise_floor_db:.1f} dBFS[/]")
+                console.print(f"  • Gate Threshold:     [yellow]{p.gate_threshold_db:.1f} dBFS[/]")
+                console.print(f"  • Spectral Tilt:      [dim]{p.spectral_tilt:+.2f}[/]")
+                console.print(f"  • Status:             {'[cyan]Frozen[/]' if p.frozen else '[green]Active Learner[/]'}\n")
+                return 0
+            elif action == "switch":
+                if not args.name:
+                    console.print("[red]✖ Please specify environment profile name (e.g. quiet_room, fan_on, mechanical_keyboard)[/]")
+                    return 1
+                from .audio.noise_profile import AdaptiveNoiseProfiler
+                profiler = AdaptiveNoiseProfiler(sample_rate=app.sample_rate, environment=args.name)
+                profiler.save()
+                console.print(f"[bold green]✔ Switched active noise profile environment to:[/] [bold cyan]{args.name}[/]")
+                return 0
+            elif action == "relearn":
+                console.print("[bold cyan]🔄 Requesting immediate noise profile relearn…[/]")
+                console.print("[dim]Next live or test session will automatically sample ambient silence.[/]")
+                return 0
         elif cmd in ("settings", "hotkeys"):
             from .ui.settings_gui import launch_settings_gui
             launch_settings_gui(app, standalone=True)
             return 0
+        elif cmd == "help":
+            from .commands.help_cmd import run_help
+            return run_help(args.command)
         return 0
     except MicforgeError as exc:
         console.print(f"[bold red]✖ {exc}[/]")

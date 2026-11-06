@@ -27,7 +27,7 @@ CABLE_HELP = {
 }
 
 
-def run_doctor(app: AppConfig) -> int:
+def run_doctor(app: AppConfig, export: bool = False, export_path: str | None = None) -> int:
     t = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", show_lines=False)
     t.add_column("", width=2)
     t.add_column("check")
@@ -113,4 +113,15 @@ def run_doctor(app: AppConfig) -> int:
         "[bold]Windows tip:[/] Sound settings → your mic → Properties → Advanced: turn off 'Audio Enhancements' "
         "and exclusive mode, or other apps can fight for the mic."
     )
+    console.print(
+        "[dim]📖 Troubleshooting guide:[/] [bold cyan]docs/TROUBLESHOOTING.md[/]"
+    )
+
+    if export or export_path:
+        from pathlib import Path
+        from ..diagnostics import collect_diagnostics, export_diagnostics_zip
+        report = collect_diagnostics(app)
+        out_zip = export_diagnostics_zip(report, Path(export_path) if export_path else None)
+        console.print(f"\n[bold green]✔ Diagnostics exported to:[/] [white]{out_zip}[/]")
+
     return 1 if problems else 0

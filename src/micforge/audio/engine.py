@@ -23,8 +23,11 @@ from ..dsp.util import db2lin, rms_db
 from ..errors import DeviceError
 from .backend import get_sd
 from .cues import CuePlayer
+from .device_watch import DeviceEventType, DeviceWatcher, DeviceWatchEvent
 from .devices import DeviceInfo, extra_settings
+from .loopback import LoopbackCapture
 from .metrics import LevelMeter, LevelSnapshot, SpectrumAnalyzer
+from .noise_profile import AdaptiveNoiseProfiler, NoiseProfile
 from .ring import RingBuffer
 
 log = logging.getLogger("micforge.engine")
@@ -69,6 +72,9 @@ class EngineSnapshot:
     calibrating: float | None
     input_gain_db: float
     sinks: dict[str, bool] = field(default_factory=dict)
+    ref_level: LevelSnapshot | None = None  # Level of speaker/game loopback audio reference
+    noise_profile: Any | None = None
+    recovering: bool = False
 
 
 class OutputSink:
@@ -87,7 +93,9 @@ class OutputSink:
         self.corrections = 0
         self.stream: Any = None
         self.channels = max(1, min(2, spec.device.max_output))
-        self._avg_fill = float(self.prefill)
+        self.target_fill = float(self.prefill + 0.5 * self.block)
+        self._avg_fill = float(self.target_fill)
+        self._calibrated_phase = False
         self._drift_cooldown = 0
         self._active = False
         self._consecutive_underruns = 0
@@ -125,14 +133,16 @@ class OutputSink:
     def _prime(self) -> None:
         self.ring.clear()
         self.prefill = self.base_prefill
-        self._avg_fill = float(self.prefill + 0.5 * self.block)
-        self._drift_cooldown = 0
+        self.target_fill = float(self.prefill + 0.5 * self.block)
+        self._avg_fill = float(self.target_fill)
+        self._drift_cooldown = -50
         self._consecutive_underruns = 0
         self._last_underrun_time = 0.0
         self._needs_fade_in = False
         self._stable_blocks = 0
         self._active = False
         self._last_sample = np.float32(0.0)
+        self._calibrated_phase = False
 
     def start(self) -> None:
         self.stream.start()
@@ -158,10 +168,12 @@ class OutputSink:
         Prevents the drift detector from misinterpreting a brief DSP swap
         pause as a physical hardware clock drift, stopping false clock fixes.
         """
-        self._avg_fill = float(self.prefill + 0.5 * self.block)
+        self.target_fill = float(self.prefill + 0.5 * self.block)
+        self._avg_fill = float(self.target_fill)
         self._drift_cooldown = 0
         self._consecutive_underruns = 0
         self._stable_blocks = 0
+        self._calibrated_phase = False
 
     def push(self, x: np.ndarray) -> None:
         if self.enabled:
@@ -169,10 +181,12 @@ class OutputSink:
                 # Arm the output sink with jitter cushion on the first incoming audio block
                 self.ring.clear()
                 self.ring.write(self._silence[:self.prefill])
-                self._avg_fill = float(self.prefill + 0.5 * self.block)
-                self._drift_cooldown = 0
+                self.target_fill = float(self.prefill + 0.5 * self.block)
+                self._avg_fill = float(self.target_fill)
+                self._drift_cooldown = -50
                 self.underruns = 0
                 self._active = True
+                self._calibrated_phase = False
             # Avoid allocation when gain is unity (0 dB) — very common case
             if self._gain_is_unity:
                 self.ring.write(x)
@@ -192,24 +206,33 @@ class OutputSink:
             return
 
         fill = self.ring.fill
-        self._avg_fill = 0.99 * self._avg_fill + 0.01 * fill
+        # Smooth low-pass filter (tau ~ 5s) tracks true hardware crystal drift, not momentary block variance
+        self._avg_fill = 0.998 * self._avg_fill + 0.002 * fill
         self._drift_cooldown += 1
 
         want = frames
-        target_fill = self.prefill + 0.5 * frames
-        deadband = int(0.4 * frames)
+        deadband = int(1.0 * frames)
 
-        # Clock drift: continuous low-pass drift tracking with 200 ms cooldown (20 blocks @ 10 ms).
-        # Nudges read length by 1 sample only on sustained real drift (>0.4 blocks deviation).
-        # Allows smoothly correcting up to 5 samples/sec (104 ppm drift), easily matching any PC hardware.
-        if self._drift_cooldown >= 20:
+        # Dynamic phase calibration: after 100 blocks (~1.0s) of stable audio,
+        # anchor target_fill directly to the true hardware steady-state fill.
+        # This completely eliminates false clock fixes caused by startup buffer offsets.
+        if not self._calibrated_phase and self._stable_blocks >= 100:
+            self.target_fill = float(self._avg_fill)
+            self._calibrated_phase = True
+            self._drift_cooldown = 0
+
+        target_fill = self.target_fill
+
+        # Clock drift: smooth drift tracking with 1.5s cooldown (150 blocks @ 10 ms).
+        # Only nudges read length by 1 sample when there is genuine, sustained crystal drift
+        # outside the 1.0-block (480-sample / 10ms) deadband.
+        if self._drift_cooldown >= 150 and self._calibrated_phase:
             if self._avg_fill > target_fill + deadband:
                 want = frames + 1
                 self._drift_cooldown = 0
             elif self._avg_fill < target_fill - deadband and fill >= frames:
                 want = frames - 1
                 self._drift_cooldown = 0
-
         # Ensure pre-allocated read buffer is large enough
         if self._read_buf.shape[0] < want:
             self._read_buf = np.zeros(want + 2, dtype=np.float32)
@@ -243,14 +266,13 @@ class OutputSink:
             self._last_underrun_time = now
             self._stable_blocks = 0
 
-            # 3. Re-arm cushion if buffer starved to prevent runaway starvation
-            if fill == 0 or got == 0:
-                self.ring.clear()
-                self.ring.write(self._silence[:self.prefill])
-                self._avg_fill = float(target_fill)
-            else:
-                self._avg_fill = float(self.ring.fill)
-            self._drift_cooldown = 0
+            # 3. Top up jitter cushion to prevent cascading starvation without discarding valid speech
+            missing = self.prefill - self.ring.fill
+            if missing > 0:
+                self.ring.write(self._silence[:missing])
+            self._avg_fill = float(target_fill)
+            # Settling cooldown prevents drift tracker from entering hunting oscillations
+            self._drift_cooldown = -100
             self._needs_fade_in = True
         else:
             self._stable_blocks += 1
@@ -312,6 +334,10 @@ class AudioEngine:
         jitter_blocks: float | int = 1.5,
         play_cues: bool = True,
         cue_volume: float = 0.5,
+        enable_loopback: bool = True,
+        aec_reference_device: Any = None,
+        enable_device_watch: bool = False,
+        noise_environment: str = "quiet_room",
     ) -> None:
         self.chain = chain
         self.input_device = input_device
@@ -321,11 +347,18 @@ class AudioEngine:
         self.sinks = {s.name: OutputSink(s, sample_rate, block_size, jitter_blocks) for s in sinks}
         self.jitter_blocks = jitter_blocks
         self.cues = CuePlayer(sample_rate=sample_rate, volume=cue_volume, enabled=play_cues)
+        self.enable_loopback = enable_loopback
+        self.aec_reference_device = aec_reference_device
+        self._loopback: LoopbackCapture | None = None
+        self.noise_profiler: AdaptiveNoiseProfiler | None = AdaptiveNoiseProfiler(sample_rate=sample_rate, environment=noise_environment)
+        self.device_watcher: DeviceWatcher | None = None
+        self._recovering = False
 
         self.bypass = False
         self.muted = False
         self._in_meter = LevelMeter(sample_rate)
         self._out_meter = LevelMeter(sample_rate)
+        self._ref_meter = LevelMeter(sample_rate)
         self._in_spec = SpectrumAnalyzer(sample_rate)
         self._out_spec = SpectrumAnalyzer(sample_rate)
         self._in_stream: Any = None
@@ -380,6 +413,20 @@ class AudioEngine:
             self._in_stream.start()
             for s in opened:
                 s.start()
+            if self.device_watcher is not None:
+                self.device_watcher.start()
+            # Start loopback capture for AEC if AEC is present and loopback is enabled
+            if self.enable_loopback and self.chain.stage("aec") is not None:
+                try:
+                    self._loopback = LoopbackCapture(
+                        sample_rate=self.sr,
+                        block_size=self.block,
+                        callback=self.feed_reference,
+                        device_spec=self.aec_reference_device,
+                    )
+                    self._loopback.start()
+                except Exception as exc:
+                    log.debug("AEC loopback startup note: %s", exc)
         except Exception:
             self._running = False
             for s in opened:
@@ -390,6 +437,17 @@ class AudioEngine:
 
     def stop(self) -> None:
         self._running = False
+        if self.device_watcher is not None:
+            try:
+                self.device_watcher.stop()
+            except Exception:
+                pass
+        if self._loopback is not None:
+            try:
+                self._loopback.stop()
+            except Exception:
+                pass
+            self._loopback = None
         if self._in_stream is not None:
             try:
                 self._in_stream.stop()
@@ -399,6 +457,98 @@ class AudioEngine:
             self._in_stream = None
         for s in self.sinks.values():
             s.close()
+
+    def enable_device_watch(self) -> None:
+        """Enable hot-plug monitoring and auto-recovery."""
+        if self.device_watcher is not None:
+            return
+        self.device_watcher = DeviceWatcher(
+            on_recovery_attempt=self._handle_device_recovery,
+            on_fallback=lambda: self.set_bypass(True),
+        )
+        if self._running:
+            self.device_watcher.start()
+
+    def _handle_device_recovery(self, kind: str, target: Any) -> bool:
+        self._recovering = True
+        try:
+            log.info("AudioEngine recovering %s stream...", kind)
+            from .devices import find_device, list_devices
+            pool = list_devices()
+            if kind == "input":
+                if self._in_stream is not None:
+                    try:
+                        self._in_stream.stop()
+                        self._in_stream.close()
+                    except Exception:
+                        pass
+                new_in = None
+                if target is not None:
+                    try:
+                        new_in = find_device(target, "input", pool)
+                    except Exception:
+                        pass
+                if new_in is None:
+                    new_in = find_device(None, "input", pool)
+                self.input_device = new_in
+                channels = max(1, min(new_in.max_input, self.input_channel + 1))
+                sd = get_sd()
+                self._in_stream = sd.InputStream(
+                    device=new_in.index,
+                    samplerate=self.sr,
+                    blocksize=self.block,
+                    channels=channels,
+                    dtype=np.float32,
+                    callback=self._on_input,
+                    **extra_settings(new_in),
+                )
+                self._in_stream.start()
+                log.info("AudioEngine input successfully rebound to: %s", new_in.name)
+                return True
+            else:
+                s = self.sinks.get(kind)
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    s.open()
+                    s.start()
+                    return True
+        except Exception as exc:
+            log.warning("Stream recovery failed: %s", exc)
+            return False
+        finally:
+            self._recovering = False
+        return False
+
+    def relearn_noise(self, duration_s: float = 1.0) -> None:
+        """Quick trigger to relearn background ambient noise."""
+        if self.noise_profiler is not None:
+            self.noise_profiler.relearn(duration_s)
+
+    def switch_noise_environment(self, name: str) -> None:
+        """Switch active noise environment profile."""
+        if self.noise_profiler is not None:
+            self.noise_profiler.switch_environment(name)
+
+    def freeze_noise_profile(self) -> None:
+        """Freeze adaptive noise profile learning."""
+        if self.noise_profiler is not None:
+            self.noise_profiler.freeze()
+
+    def unfreeze_noise_profile(self) -> None:
+        """Unfreeze adaptive noise profile learning."""
+        if self.noise_profiler is not None:
+            self.noise_profiler.unfreeze()
+
+    def feed_reference(self, ref_data: np.ndarray) -> None:
+        """Feed far-end system/speaker audio to AEC and reference level meter."""
+        if ref_data is not None and len(ref_data) > 0:
+            self._ref_meter.feed(ref_data)
+        aec = self.chain.stage("aec")
+        if aec is not None and hasattr(aec, "feed_reference"):
+            aec.feed_reference(ref_data)
 
     def __enter__(self) -> "AudioEngine":
         self.start()
@@ -472,6 +622,10 @@ class AudioEngine:
             self._in_spec.feed(x)
             self._collect_calibration(x)
             processed = self.chain.process(x)
+            if self.noise_profiler is not None:
+                gate = self.chain.stage("gate")
+                is_voiced = bool(getattr(gate, "is_open", False))
+                self.noise_profiler.update(x, is_voiced=is_voiced)
             out = x if self.bypass else processed
             if self.muted:
                 out = np.zeros_like(out)
@@ -578,6 +732,9 @@ class AudioEngine:
             calibrating=self._cal_progress,
             input_gain_db=self.chain.input_gain_db,
             sinks={n: s.enabled for n, s in self.sinks.items()},
+            ref_level=self._ref_meter.snapshot if (self._loopback is not None and self._loopback._running) else None,
+            noise_profile=self.noise_profiler.current_profile if self.noise_profiler is not None else None,
+            recovering=self._recovering,
         )
 
     @property

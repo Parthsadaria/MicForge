@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import scipy.signal as sig
 
 from .base import Processor
 from .util import EPS, db2lin, rms_db
@@ -84,11 +83,21 @@ class CoFiLiteDenoiser(Processor):
         # Design stateful polyphase FIR anti-aliasing filters for 48k <-> 16k resampling
         if self.sample_rate == 48000:
             self._resample_ratio = 3
-            # Lowpass filter with cutoff at pi / 3
-            self._fir_h = sig.firwin(31, 1.0 / 3.0, window="hamming").astype(np.float32)
+            # Lowpass FIR filter with cutoff at pi / 3 (pure numpy sinc with hamming window)
+            n = np.arange(31) - 15.0
+            h = (1.0 / 3.0) * np.sinc((1.0 / 3.0) * n)
+            w = 0.54 - 0.46 * np.cos(2.0 * np.pi * np.arange(31) / 30.0)
+            hw = h * w
+            self._fir_h = (hw / np.sum(hw)).astype(np.float32)
+            self._fir_h_up = (3.0 * self._fir_h).astype(np.float32)
+            self._ext_down = np.zeros(0, dtype=np.float32)
+            self._ext_up = np.zeros(0, dtype=np.float32)
         else:
             self._resample_ratio = 1
             self._fir_h = None
+            self._fir_h_up = None
+            self._ext_down = np.zeros(0, dtype=np.float32)
+            self._ext_up = np.zeros(0, dtype=np.float32)
 
         self._model_path: Path | None = None
         self._session: Any = None
@@ -134,6 +143,8 @@ class CoFiLiteDenoiser(Processor):
                 opts = ort.SessionOptions()
                 opts.intra_op_num_threads = 1
                 opts.inter_op_num_threads = 1
+                opts.enable_cpu_mem_arena = False
+                opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
                 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 session = ort.InferenceSession(str(p), opts, providers=["CPUExecutionProvider"])
                 _SESSION_CACHE[cache_key] = session
@@ -210,7 +221,13 @@ class CoFiLiteDenoiser(Processor):
         """Measure room noise floor and spectral profile."""
         x = np.asarray(noise, dtype=np.float32)
         if self.sample_rate != self.model_sr and self.sample_rate == 48000:
-            x_16k = sig.resample_poly(x, 1, 3).astype(np.float32)
+            if self._fir_h is not None:
+                x_16k = np.convolve(x, self._fir_h, mode="same")[::3].astype(np.float32)
+            else:
+                x_16k = x[::3]
+        elif self.sample_rate != self.model_sr:
+            import scipy.signal as sig
+            x_16k = sig.resample_poly(x, 160, self.sample_rate // 100).astype(np.float32)
         else:
             x_16k = x
         self._noise_floor_est = rms_db(x_16k)
@@ -257,11 +274,18 @@ class CoFiLiteDenoiser(Processor):
         # 1. Downsample to 16 kHz
         if self.sample_rate == 48000:
             # Fast stateful decimation 3:1 with zero boundary clicks
-            down, self._zi_down = sig.lfilter(self._fir_h, 1.0, x, zi=self._zi_down)
+            ext_len = len(self._zi_down) + len(x)
+            if self._ext_down.shape[0] != ext_len:
+                self._ext_down = np.empty(ext_len, dtype=np.float32)
+            self._ext_down[: len(self._zi_down)] = self._zi_down
+            self._ext_down[len(self._zi_down) :] = x
+            down = np.convolve(self._ext_down, self._fir_h, mode="valid")[: len(x)]
+            self._zi_down[:] = self._ext_down[-len(self._zi_down) :]
             x_16k = down[::3].astype(np.float32, copy=False)
         elif self.sample_rate == 16000:
             x_16k = x.astype(np.float32, copy=False)
         else:
+            import scipy.signal as sig
             x_16k = sig.resample_poly(x, 160, self.sample_rate // 100).astype(np.float32)
 
         n_16k = x_16k.shape[0]
@@ -380,11 +404,18 @@ class CoFiLiteDenoiser(Processor):
             else:
                 self._up_zero.fill(0)
             self._up_zero[::3] = chunk_16k
-            out_48k, self._zi_up = sig.lfilter(3.0 * self._fir_h, 1.0, self._up_zero, zi=self._zi_up)
+            ext_up_len = len(self._zi_up) + len(self._up_zero)
+            if self._ext_up.shape[0] != ext_up_len:
+                self._ext_up = np.empty(ext_up_len, dtype=np.float32)
+            self._ext_up[: len(self._zi_up)] = self._zi_up
+            self._ext_up[len(self._zi_up) :] = self._up_zero
+            out_48k = np.convolve(self._ext_up, self._fir_h_up, mode="valid")[: len(self._up_zero)]
+            self._zi_up[:] = self._ext_up[-len(self._zi_up) :]
             return out_48k[:n_in].astype(np.float32, copy=False)
         elif self.sample_rate == 16000:
             return chunk_16k[:n_in]
         else:
+            import scipy.signal as sig
             out_target = sig.resample_poly(chunk_16k, self.sample_rate // 100, 160).astype(np.float32)
             return out_target[:n_in]
 

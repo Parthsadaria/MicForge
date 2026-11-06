@@ -107,13 +107,15 @@ def test_drift_correction_does_not_count_as_underrun():
     )
     sink = OutputSink(SinkSpec("test", dev, enabled=True, gain_db=0.0), 48000, 480, 2.5)
     sink._active = True
+    sink._calibrated_phase = True
+    sink.target_fill = float(sink.prefill + 0.5 * 480)
 
     # Preload buffer with sufficient audio
     sink.ring.write(np.zeros(2000, dtype=np.float32))
 
     # Trigger drift correction in negative direction (want = frames - 1 = 479)
-    sink._drift_cooldown = 50
-    sink._avg_fill = sink.prefill + 0.5 * 480 - int(0.6 * 480)
+    sink._drift_cooldown = 150
+    sink._avg_fill = sink.target_fill - int(1.2 * 480)
 
     outdata = np.zeros((480, 2), dtype=np.float32)
     sink._callback(outdata, 480, None, None)
@@ -130,13 +132,15 @@ def test_drift_correction_smoothness():
     )
     sink = OutputSink(SinkSpec("test", dev, enabled=True, gain_db=0.0), 48000, 480, 2.5)
     sink._active = True
+    sink._calibrated_phase = True
+    sink.target_fill = float(sink.prefill + 0.5 * 480)
 
     t = np.arange(48000, dtype=np.float32) / 48000.0
     smooth = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
     sink.ring.write(smooth)
 
-    sink._drift_cooldown = 50
-    sink._avg_fill = sink.prefill + 0.5 * 480 + int(0.6 * 480)
+    sink._drift_cooldown = 150
+    sink._avg_fill = sink.target_fill + int(1.2 * 480)
 
     outdata = np.zeros((480, 2), dtype=np.float32)
     sink._callback(outdata, 480, None, None)
