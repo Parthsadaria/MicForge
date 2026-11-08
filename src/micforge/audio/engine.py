@@ -187,6 +187,18 @@ class OutputSink:
                 self.underruns = 0
                 self._active = True
                 self._calibrated_phase = False
+
+            # Anti-burst latency ceiling:
+            # If processing thread experienced a timing stall, avoid letting delayed audio
+            # queue up in a large backlog. Caps fill to target + 1.0 block (~25 ms) so Discord
+            # WebRTC NetEQ jitter buffer never experiences delay spikes that trigger 2x speed catch-up.
+            max_cushion = int(self.prefill + 1.0 * self.block)
+            current_fill = self.ring.fill
+            if current_fill > max_cushion:
+                excess = current_fill - max_cushion
+                self.ring._r += excess
+                self.corrections += 1
+
             # Avoid allocation when gain is unity (0 dB) — very common case
             if self._gain_is_unity:
                 self.ring.write(x)
@@ -307,12 +319,6 @@ class OutputSink:
             self.corrections += 1
         else:
             outdata[:frames, 0] = self._read_buf[:frames]
-
-        # Track last output sample for continuity
-        self._last_sample = outdata[frames - 1, 0]
-
-        if self.channels > 1:
-            outdata[:, 1:] = outdata[:, :1]
 
         # Track last output sample for continuity
         self._last_sample = outdata[frames - 1, 0]
@@ -714,13 +720,16 @@ class AudioEngine:
 
     def snapshot(self) -> EngineSnapshot:
         mon = self.sinks.get("monitor")
+        tel = dict(self._telemetry)
+        if hasattr(self.chain, "stage_timings"):
+            tel["stage_timings"] = self.chain.stage_timings()
         return EngineSnapshot(
             running=self._running,
             in_level=self._in_meter.snapshot,
             out_level=self._out_meter.snapshot,
             in_bands=self._in_spec.bands.copy(),
             out_bands=self._out_spec.bands.copy(),
-            telemetry=dict(self._telemetry),
+            telemetry=tel,
             cpu_load=self._cpu,
             cpu_peak=self._cpu_peak,
             input_overflows=self._overflows,

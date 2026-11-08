@@ -1,9 +1,9 @@
 # Micforge
 
-[![Version](https://img.shields.io/badge/version-1.3.1-0284c7.svg)](verison%20notes/v1.3.1.md)
+[![Version](https://img.shields.io/badge/version-1.3.2-0284c7.svg)](verison%20notes/v1.3.2.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-emerald.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-139%2F139%20passing-teal.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-144%2F144%20passing-teal.svg)](tests/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-neutral.svg)]()
 
 > **Real-time, local-first microphone clean-up for Discord, gaming, and streaming.**  

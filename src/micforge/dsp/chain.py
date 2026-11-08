@@ -33,6 +33,9 @@ class StageTimingStats:
         self.buf = np.zeros(capacity, dtype=np.int64)
         self.count = 0
         self.total_blocks = 0
+        self._cached_p50 = 0.0
+        self._cached_p99 = 0.0
+        self._last_calc = -1
 
     def record(self, elapsed_ns: int) -> None:
         self.total_blocks += 1
@@ -43,13 +46,18 @@ class StageTimingStats:
         self.count += 1
 
     def percentiles_us(self) -> tuple[float, float]:
-        """Return (p50_us, p99_us) in microseconds."""
+        """Return (p50_us, p99_us) in microseconds with count-based caching."""
+        if self.count == self._last_calc:
+            return self._cached_p50, self._cached_p99
         valid = min(self.count, self.capacity)
         if valid < 5:
             return 0.0, 0.0
         arr = self.buf[:valid]
         p50, p99 = np.percentile(arr, [50, 99])
-        return float(p50 / 1000.0), float(p99 / 1000.0)
+        self._cached_p50 = float(p50 / 1000.0)
+        self._cached_p99 = float(p99 / 1000.0)
+        self._last_calc = self.count
+        return self._cached_p50, self._cached_p99
 
 
 class Chain:
@@ -96,8 +104,11 @@ class Chain:
                 self._init_stats_and_stages()
                 return
             if hasattr(s, "sub_stages") and name in s.sub_stages:
-                s.sub_stages[name] = new_stage
-                setattr(s, name, new_stage)
+                if hasattr(s, "replace_sub_stage"):
+                    s.replace_sub_stage(name, new_stage)
+                else:
+                    s.sub_stages[name] = new_stage
+                    setattr(s, name, new_stage)
                 self._init_stats_and_stages()
                 return
 

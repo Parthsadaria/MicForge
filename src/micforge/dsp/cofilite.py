@@ -297,16 +297,16 @@ class CoFiLiteDenoiser(Processor):
         mask = np.clip(enh_mag / dry_mag, 0.0, 1.0)
         raw_vad = float(np.mean(mask[10:128]))
 
-        # Smooth with fast attack (0.75) and slow release (0.08)
+        # Smooth with fast attack (0.85) to preserve leading consonants and slow release (0.08)
         if raw_vad > self._smoothed_vad:
-            self._smoothed_vad = 0.25 * self._smoothed_vad + 0.75 * raw_vad
+            self._smoothed_vad = 0.15 * self._smoothed_vad + 0.85 * raw_vad
         else:
             self._smoothed_vad = 0.92 * self._smoothed_vad + 0.08 * raw_vad
 
-        # Apply hysteresis (0.45 ON / 0.25 OFF) to avoid gate chattering
-        if self._smoothed_vad >= 0.45:
+        # Apply hysteresis (0.35 ON / 0.20 OFF) for prompt onset tracking without gate chatter
+        if self._smoothed_vad >= 0.35:
             self._is_speech = True
-        elif self._smoothed_vad <= 0.25:
+        elif self._smoothed_vad <= 0.20:
             self._is_speech = False
 
         self.is_speech = self._is_speech

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
@@ -180,13 +181,13 @@ class SpectralDenoiser(Processor):
         raw_vad = float(np.mean(g[bin_lo:bin_hi])) if bin_hi > bin_lo else float(np.mean(g))
 
         if raw_vad > self._smoothed_vad:
-            self._smoothed_vad = 0.25 * self._smoothed_vad + 0.75 * raw_vad
+            self._smoothed_vad = 0.15 * self._smoothed_vad + 0.85 * raw_vad
         else:
             self._smoothed_vad = 0.92 * self._smoothed_vad + 0.08 * raw_vad
 
-        if self._smoothed_vad >= 0.45:
+        if self._smoothed_vad >= 0.35:
             self._is_speech = True
-        elif self._smoothed_vad <= 0.25:
+        elif self._smoothed_vad <= 0.20:
             self._is_speech = False
 
         self.is_speech = self._is_speech

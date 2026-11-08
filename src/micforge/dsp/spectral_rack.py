@@ -41,12 +41,10 @@ class SpectralRack(Processor):
         }
 
         # Determine processing grid sample rate
-        # CoFi-Lite neural model natively operates on 16 kHz grid (512 FFT = 257 bins)
-        if getattr(self.denoise, "model_sr", None) == 16000:
-            self.grid_sr = 16000
-        else:
-            self.grid_sr = sample_rate
-
+        # CoFi-Lite neural model natively operates on 16 kHz grid (512 FFT = 257 bins).
+        # We enforce the unified 16 kHz grid across all denoisers to ensure seamless
+        # mathematical equivalence, single STFT framing, and consistent VAD frequency bands.
+        self.grid_sr = 16000
         self.n_fft = 512
         self.hop = 256
         self.n_bins = self.n_fft // 2 + 1  # 257
@@ -61,8 +59,12 @@ class SpectralRack(Processor):
         # Timing instrumentation for internal sub-stages
         self._sub_timings_ns: dict[str, int] = {"aec": 0, "denoise": 0, "deverb": 0}
 
-        # Design stateful polyphase FIR anti-aliasing filters for 48k <-> 16k resampling
+        # Universal stateful polyphase FIR anti-aliasing filters
+        self._resample_ratio = 1
+        self._down_up = 1
+        self._down_down = 1
         if self.sample_rate == 48000 and self.grid_sr == 16000:
+            self._resample_mode = "fir_3"
             self._resample_ratio = 3
             n = np.arange(31) - 15.0
             h = (1.0 / 3.0) * np.sinc((1.0 / 3.0) * n)
@@ -73,13 +75,36 @@ class SpectralRack(Processor):
             self._ext_down = np.zeros(0, dtype=np.float32)
             self._ext_up = np.zeros(0, dtype=np.float32)
             self._up_zero = np.zeros(480, dtype=np.float32)
-        else:
-            self._resample_ratio = 1
+        elif self.sample_rate == 32000 and self.grid_sr == 16000:
+            self._resample_mode = "fir_2"
+            self._resample_ratio = 2
+            n = np.arange(31) - 15.0
+            h = (1.0 / 2.0) * np.sinc((1.0 / 2.0) * n)
+            w = 0.54 - 0.46 * np.cos(2.0 * np.pi * np.arange(31) / 30.0)
+            hw = h * w
+            self._fir_h = (hw / np.sum(hw)).astype(np.float32)
+            self._fir_h_up = (2.0 * self._fir_h).astype(np.float32)
+            self._ext_down = np.zeros(0, dtype=np.float32)
+            self._ext_up = np.zeros(0, dtype=np.float32)
+            self._up_zero = np.zeros(320, dtype=np.float32)
+        elif self.sample_rate == 16000:
+            self._resample_mode = "direct"
             self._fir_h = None
             self._fir_h_up = None
             self._ext_down = np.zeros(0, dtype=np.float32)
             self._ext_up = np.zeros(0, dtype=np.float32)
             self._up_zero = np.zeros(0, dtype=np.float32)
+        else:
+            self._resample_mode = "poly"
+            self._fir_h = None
+            self._fir_h_up = None
+            self._ext_down = np.zeros(0, dtype=np.float32)
+            self._ext_up = np.zeros(0, dtype=np.float32)
+            self._up_zero = np.zeros(0, dtype=np.float32)
+            import math
+            g = math.gcd(int(self.sample_rate), int(self.grid_sr))
+            self._down_up = self.grid_sr // g
+            self._down_down = self.sample_rate // g
 
         # Pre-allocated circular buffers
         self._in_buf = np.zeros(4096, dtype=np.float32)
@@ -102,7 +127,9 @@ class SpectralRack(Processor):
             return 0
         if self.sample_rate == 48000 and self.grid_sr == 16000:
             return 1470  # CoFi-Lite STFT group delay (490 @ 16k * 3)
-        return self.n_fft
+        elif self.sample_rate == 32000 and self.grid_sr == 16000:
+            return 980   # 490 @ 16k * 2
+        return int(round(490.0 * (self.sample_rate / 16000.0)))
 
     @property
     def speech_prob(self) -> float | None:
@@ -113,6 +140,18 @@ class SpectralRack(Processor):
     @property
     def is_speech(self) -> bool:
         return bool(getattr(self.denoise, "is_speech", False))
+
+    def replace_sub_stage(self, name: str, new_stage: Processor) -> None:
+        """Replace an internal spectral processor and align it to the 16 kHz grid."""
+        if name in self.sub_stages:
+            self.sub_stages[name] = new_stage
+            setattr(self, name, new_stage)
+            if hasattr(new_stage, "sample_rate"):
+                new_stage.sample_rate = self.grid_sr
+            if hasattr(new_stage, "n_bins") and hasattr(new_stage, "n_fft"):
+                new_stage.n_bins = self.n_bins
+                new_stage.n_fft = self.n_fft
+                new_stage.hop = self.hop
 
     def reset(self) -> None:
         self.aec.reset()
@@ -146,8 +185,8 @@ class SpectralRack(Processor):
 
         n_in = x.shape[0]
 
-        # 1. Resample to grid sample rate (48 kHz -> 16 kHz if applicable)
-        if self._resample_ratio == 3:
+        # 1. Resample to grid sample rate (16 kHz)
+        if self._resample_mode == "fir_3":
             ext_len = len(self._zi_down) + len(x)
             if self._ext_down.shape[0] != ext_len:
                 self._ext_down = np.empty(ext_len, dtype=np.float32)
@@ -156,6 +195,18 @@ class SpectralRack(Processor):
             down = np.convolve(self._ext_down, self._fir_h, mode="valid")[: len(x)]
             self._zi_down[:] = self._ext_down[-len(self._zi_down) :]
             x_grid = down[::3].astype(np.float32, copy=False)
+        elif self._resample_mode == "fir_2":
+            ext_len = len(self._zi_down) + len(x)
+            if self._ext_down.shape[0] != ext_len:
+                self._ext_down = np.empty(ext_len, dtype=np.float32)
+            self._ext_down[: len(self._zi_down)] = self._zi_down
+            self._ext_down[len(self._zi_down) :] = x
+            down = np.convolve(self._ext_down, self._fir_h, mode="valid")[: len(x)]
+            self._zi_down[:] = self._ext_down[-len(self._zi_down) :]
+            x_grid = down[::2].astype(np.float32, copy=False)
+        elif self._resample_mode == "poly":
+            import scipy.signal as sig
+            x_grid = sig.resample_poly(x, self._down_up, self._down_down).astype(np.float32)
         else:
             x_grid = x.astype(np.float32, copy=False)
 
@@ -233,8 +284,8 @@ class SpectralRack(Processor):
         else:
             chunk_grid = np.zeros(n_grid, dtype=np.float32)
 
-        # 4. Upsample back to target sample rate (16 kHz -> 48 kHz if applicable)
-        if self._resample_ratio == 3:
+        # 4. Upsample back to target sample rate (16 kHz -> sample_rate)
+        if self._resample_mode == "fir_3":
             if self._up_zero.shape[0] != n_grid * 3:
                 self._up_zero = np.zeros(n_grid * 3, dtype=np.float32)
             else:
@@ -248,6 +299,28 @@ class SpectralRack(Processor):
             out_48k = np.convolve(self._ext_up, self._fir_h_up, mode="valid")[: len(self._up_zero)]
             self._zi_up[:] = self._ext_up[-len(self._zi_up) :]
             return out_48k[:n_in].astype(np.float32, copy=False)
+        elif self._resample_mode == "fir_2":
+            if self._up_zero.shape[0] != n_grid * 2:
+                self._up_zero = np.zeros(n_grid * 2, dtype=np.float32)
+            else:
+                self._up_zero.fill(0)
+            self._up_zero[::2] = chunk_grid
+            ext_up_len = len(self._zi_up) + len(self._up_zero)
+            if self._ext_up.shape[0] != ext_up_len:
+                self._ext_up = np.empty(ext_up_len, dtype=np.float32)
+            self._ext_up[: len(self._zi_up)] = self._zi_up
+            self._ext_up[len(self._zi_up) :] = self._up_zero
+            out_32k = np.convolve(self._ext_up, self._fir_h_up, mode="valid")[: len(self._up_zero)]
+            self._zi_up[:] = self._ext_up[-len(self._zi_up) :]
+            return out_32k[:n_in].astype(np.float32, copy=False)
+        elif self._resample_mode == "poly":
+            import scipy.signal as sig
+            out = sig.resample_poly(chunk_grid, self._down_down, self._down_up).astype(np.float32)
+            if out.shape[0] >= n_in:
+                return out[:n_in]
+            padded = np.zeros(n_in, dtype=np.float32)
+            padded[: out.shape[0]] = out
+            return padded
 
         return chunk_grid[:n_in]
 
